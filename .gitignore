@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# 环境变量
+.env
+
+# 上传文件
+uploads/*
+
+# 向量数据
+chroma_data/*
+
+# 数据库
+*.db
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
