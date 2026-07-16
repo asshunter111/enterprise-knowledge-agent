@@ -29,13 +29,13 @@ def _get_collection():
 async def add_chunks(chunks: list, doc_id: str, doc_name: str) -> int:
     """将文档分块存入向量库，返回存入数量"""
     collection = _get_collection()
-    texts = [c.content for c in chunks]
+    texts = [c["content"] for c in chunks]
     embeddings = await embed_texts(texts)
 
     ids = [str(uuid.uuid4()) for _ in chunks]
     metadatas = [
         {
-            **c.metadata,
+            **c["metadata"],
             "doc_id": doc_id,
             "doc_name": doc_name,
         }

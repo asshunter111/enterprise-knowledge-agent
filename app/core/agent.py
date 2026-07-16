@@ -1,11 +1,11 @@
-"""Agent 工作流 — LangGraph 多步骤推理 + 工具调用"""
+"""Agent workflow — LangGraph orchestration"""
 from typing import List, TypedDict, Annotated
 import operator
 
 from langgraph.graph import StateGraph, END
 
 from app.core.retriever import retrieve_with_rerank
-from app.core.generator import generate_answer, extract_citations
+from app.core.generator import generate_answer
 
 
 class AgentState(TypedDict):
@@ -14,35 +14,24 @@ class AgentState(TypedDict):
     retrieved_docs: List[dict]
     answer: str
     citations: List[dict]
-    steps: Annotated[List[str], operator.add]  # 思考步骤记录
+    steps: Annotated[List[str], operator.add]
 
 
 async def step_retrieve(state: AgentState) -> AgentState:
-    """步骤1：检索相关文档"""
     docs = await retrieve_with_rerank(state["query"])
     return {
         "retrieved_docs": docs,
-        "steps": [f"检索完成，找到 {len(docs)} 个相关段落"],
+        "steps": [f"检索到 {len(docs)} 个相关片段"],
     }
 
 
-async def step_verify(state: AgentState) -> dict:
-    """步骤2：验证检索质量，决定是否需要扩大检索"""
-    docs = state.get("retrieved_docs", [])
-    # 如果最高分太低，标记为低质量
-    if not docs or docs[0].get("score", 0) < 0.3:
-        return {"steps": ["检索质量较低，可能无法给出准确回答"]}
-    return {"steps": ["检索质量良好，开始生成回答"]}
-
-
 async def step_generate(state: AgentState) -> AgentState:
-    """步骤3：生成回答 + 引用"""
     docs = state.get("retrieved_docs", [])
     if not docs:
         return {
-            "answer": "抱歉，未在知识库中找到相关信息。请尝试上传更多相关文档。",
+            "answer": "抱歉，知识库中暂无相关信息，请上传更多文档后重试。",
             "citations": [],
-            "steps": ["无相关文档，无法生成回答"],
+            "steps": ["未找到相关文档"],
         }
 
     result = await generate_answer(
@@ -57,36 +46,31 @@ async def step_generate(state: AgentState) -> AgentState:
     }
 
 
-# ── 构建 Agent 图 ──
+def build_graph():
+    """构建检索→生成两阶段工作流，保持简单"""
+    wf = StateGraph(AgentState)
 
-def build_agent_graph() -> StateGraph:
-    workflow = StateGraph(AgentState)
+    wf.add_node("retrieve", step_retrieve)
+    wf.add_node("generate", step_generate)
 
-    workflow.add_node("retrieve", step_retrieve)
-    workflow.add_node("verify", step_verify)
-    workflow.add_node("generate", step_generate)
+    wf.set_entry_point("retrieve")
+    wf.add_edge("retrieve", "generate")
+    wf.add_edge("generate", END)
 
-    workflow.set_entry_point("retrieve")
-    workflow.add_edge("retrieve", "verify")
-    workflow.add_edge("verify", "generate")
-    workflow.add_edge("generate", END)
-
-    return workflow.compile()
+    return wf.compile()
 
 
-# 全局 Agent 实例
 _agent = None
 
 
 def get_agent():
     global _agent
     if _agent is None:
-        _agent = build_agent_graph()
+        _agent = build_graph()
     return _agent
 
 
 async def run_agent(query: str, history: List[dict] = None) -> dict:
-    """运行 Agent 工作流"""
     agent = get_agent()
     result = await agent.ainvoke({
         "query": query,

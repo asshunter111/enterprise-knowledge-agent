@@ -11,7 +11,7 @@ from app.config import UPLOAD_DIR, ALLOWED_EXTENSIONS, MAX_UPLOAD_SIZE
 from app.models.database import get_db
 from app.models.document import Document
 from app.schemas import DocumentOut
-from app.core.document_parser import DocumentParser
+from app.core.document_parser import parse_document, chunk_text
 from app.core.vector_store import add_chunks, delete_by_doc_id
 
 router = APIRouter(prefix="/documents", tags=["文档管理"])
@@ -46,8 +46,8 @@ async def upload_document(
 
     # 解析 + 分块 + 向量化
     try:
-        text = DocumentParser.parse(save_path)
-        chunks = DocumentParser.chunk(text)
+        text = parse_document(save_path)
+        chunks = chunk_text(text)
         count = await add_chunks(chunks, doc_id, file.filename)
         doc.chunk_count = count
         doc.status = "ready"

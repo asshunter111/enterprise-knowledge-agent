@@ -1,23 +1,23 @@
-"""LLM 答案生成器 — 基于检索内容生成带引用的回答"""
+"""Answer generation with citation support"""
 from typing import List, AsyncIterator
 
 from langchain_openai import ChatOpenAI
 
 from app.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 
-SYSTEM_PROMPT = """你是一个企业知识库智能助手。请严格基于以下【参考资料】回答用户问题。
+SYSTEM_PROMPT = """你是一个企业内部知识库助手，只能基于下方【参考资料】回答问题。
 
-规则：
-1. 如果资料中有答案，直接基于资料回答，并在回答末尾标注引用来源。
-2. 如果资料中没有答案，明确说"根据现有资料无法回答"，不要编造。
-3. 回答简洁专业，使用 Markdown 格式。
-4. 引用格式：[来源: {文档名} 段落{段落号}]
+要求：
+- 资料里有答案 → 直接引用回答，末尾标注来源
+- 资料里没有 → 说"资料中未找到相关信息"，严禁编造
+- 使用 Markdown 排版
+- 引用格式：[来源: {文档名}]
 
 【参考资料】
 {context}"""
 
 
-def _get_llm() -> ChatOpenAI:
+def _get_llm():
     return ChatOpenAI(
         api_key=LLM_API_KEY,
         base_url=LLM_BASE_URL,
@@ -26,28 +26,24 @@ def _get_llm() -> ChatOpenAI:
     )
 
 
-def build_context(docs: List[dict]) -> str:
-    """用检索结果构建上下文"""
+def _build_context(docs: List[dict]) -> str:
     parts = []
     for i, doc in enumerate(docs, 1):
-        name = doc["metadata"].get("doc_name", "未知文档")
-        chunk_idx = doc["metadata"].get("chunk_index", i)
-        parts.append(f"[{i}] 来源: {name} 段落{chunk_idx}\n{doc['content']}")
+        name = doc["metadata"].get("doc_name", "未知")
+        parts.append(f"[{i}] {name}:\n{doc['content']}")
     return "\n\n---\n\n".join(parts)
 
 
-def extract_citations(docs: List[dict]) -> List[dict]:
-    """提取引用信息"""
-    return [
-        {
+def _extract_citations(docs: List[dict]) -> List[dict]:
+    citations = []
+    for i, d in enumerate(docs):
+        citations.append({
             "index": i + 1,
-            "doc_name": d["metadata"].get("doc_name", "未知"),
-            "chunk_index": d["metadata"].get("chunk_index", i),
+            "doc_name": d["metadata"].get("doc_name", "未命名文档"),
             "content_preview": d["content"][:200],
             "score": round(d.get("score", d.get("rerank_score", 0)), 4),
-        }
-        for i, d in enumerate(docs)
-    ]
+        })
+    return citations
 
 
 async def generate_answer(
@@ -55,19 +51,18 @@ async def generate_answer(
     retrieved_docs: List[dict],
     history: List[dict] = None,
 ) -> dict:
-    """生成完整回答（非流式）"""
     llm = _get_llm()
-    context = build_context(retrieved_docs)
+    context = _build_context(retrieved_docs)
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT.format(context=context)}]
     if history:
-        messages.extend(history[-6:])  # 只保留最近6条
+        messages.extend(history[-6:])
     messages.append({"role": "user", "content": query})
 
     response = await llm.ainvoke(messages)
     return {
         "answer": response.content,
-        "citations": extract_citations(retrieved_docs),
+        "citations": _extract_citations(retrieved_docs),
     }
 
 
@@ -76,9 +71,8 @@ async def generate_answer_stream(
     retrieved_docs: List[dict],
     history: List[dict] = None,
 ) -> AsyncIterator[str]:
-    """流式生成回答"""
     llm = _get_llm()
-    context = build_context(retrieved_docs)
+    context = _build_context(retrieved_docs)
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT.format(context=context)}]
     if history:

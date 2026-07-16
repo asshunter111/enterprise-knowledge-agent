@@ -1,4 +1,4 @@
-"""聊天 API — 会话管理 + 知识问答 + 流式"""
+"""会话 & 问答 API"""
 import json
 import uuid
 
@@ -17,19 +17,17 @@ from app.core.agent import run_agent
 router = APIRouter(tags=["智能问答"])
 
 
-# ── 会话管理 ──
+# ── 会话 ──
 
 @router.post("/sessions", response_model=SessionOut)
-async def create_session(
-    body: SessionCreate, db: AsyncSession = Depends(get_db),
-):
-    session = ChatSession(title=body.title)
-    db.add(session)
+async def create_session(body: SessionCreate, db: AsyncSession = Depends(get_db)):
+    s = ChatSession(title=body.title)
+    db.add(s)
     await db.commit()
-    await db.refresh(session)
+    await db.refresh(s)
     return SessionOut(
-        id=session.id, title=session.title,
-        created_at=str(session.created_at), updated_at=str(session.updated_at),
+        id=s.id, title=s.title,
+        created_at=str(s.created_at), updated_at=str(s.updated_at),
     )
 
 
@@ -38,61 +36,70 @@ async def list_sessions(db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(ChatSession).order_by(ChatSession.updated_at.desc())
     )
-    sessions = result.scalars().all()
     return [
         SessionOut(
             id=s.id, title=s.title,
             created_at=str(s.created_at), updated_at=str(s.updated_at),
         )
-        for s in sessions
+        for s in result.scalars().all()
     ]
 
 
 @router.delete("/sessions/{session_id}")
 async def delete_session(session_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(ChatSession).where(ChatSession.id == session_id)
-    )
-    session = result.scalar_one_or_none()
-    if not session:
+    result = await db.execute(select(ChatSession).where(ChatSession.id == session_id))
+    s = result.scalar_one_or_none()
+    if not s:
         raise HTTPException(404, "会话不存在")
-    await db.delete(session)
+    await db.delete(s)
     await db.commit()
-    return {"message": "删除成功"}
+    return {"message": "已删除"}
 
 
 # ── 问答 ──
 
-@router.post("/chat", response_model=ChatResponse)
-async def chat(body: ChatRequest, db: AsyncSession = Depends(get_db)):
-    """知识问答（非流式）"""
-    # 获取或创建会话
-    session = await _get_or_create_session(body.session_id, db)
+async def _get_session(session_id: str | None, db: AsyncSession) -> ChatSession:
+    if session_id:
+        result = await db.execute(
+            select(ChatSession).where(ChatSession.id == session_id)
+        )
+        s = result.scalar_one_or_none()
+        if s:
+            return s
+    s = ChatSession(title="新对话")
+    db.add(s)
+    await db.commit()
+    await db.refresh(s)
+    return s
 
-    # 取历史消息
+
+async def _build_history(session_id: str, db: AsyncSession) -> list[dict]:
     result = await db.execute(
         select(ChatMessage)
-        .where(ChatMessage.session_id == session.id)
+        .where(ChatMessage.session_id == session_id)
         .order_by(ChatMessage.created_at.asc())
     )
-    messages = result.scalars().all()
-    history = [
-        {"role": m.role, "content": m.content} for m in messages[-10:]
+    return [
+        {"role": m.role, "content": m.content}
+        for m in result.scalars().all()[-10:]
     ]
 
-    # 运行 Agent
+
+@router.post("/chat", response_model=ChatResponse)
+async def chat(body: ChatRequest, db: AsyncSession = Depends(get_db)):
+    session = await _get_session(body.session_id, db)
+    history = await _build_history(session.id, db)
+
     result = await run_agent(query=body.query, history=history)
 
     # 保存消息
-    user_msg = ChatMessage(session_id=session.id, role="user", content=body.query)
-    db.add(user_msg)
-    assistant_msg = ChatMessage(
+    db.add(ChatMessage(session_id=session.id, role="user", content=body.query))
+    db.add(ChatMessage(
         session_id=session.id,
         role="assistant",
         content=result["answer"],
         citations=json.dumps(result["citations"], ensure_ascii=False),
-    )
-    db.add(assistant_msg)
+    ))
     await db.commit()
 
     return ChatResponse(
@@ -101,7 +108,6 @@ async def chat(body: ChatRequest, db: AsyncSession = Depends(get_db)):
         citations=[
             Citation(
                 index=c["index"], doc_name=c["doc_name"],
-                chunk_index=c["chunk_index"],
                 content_preview=c["content_preview"], score=c["score"],
             )
             for c in result["citations"]
@@ -113,76 +119,41 @@ async def chat(body: ChatRequest, db: AsyncSession = Depends(get_db)):
 
 @router.post("/chat/stream")
 async def chat_stream(body: ChatRequest, db: AsyncSession = Depends(get_db)):
-    """知识问答（SSE 流式）"""
-    session = await _get_or_create_session(body.session_id, db)
+    session = await _get_session(body.session_id, db)
+    history = await _build_history(session.id, db)
 
-    result = await db.execute(
-        select(ChatMessage)
-        .where(ChatMessage.session_id == session.id)
-        .order_by(ChatMessage.created_at.asc())
-    )
-    messages = result.scalars().all()
-    history = [{"role": m.role, "content": m.content} for m in messages[-10:]]
-
-    # 保存用户消息
-    user_msg = ChatMessage(session_id=session.id, role="user", content=body.query)
-    db.add(user_msg)
+    db.add(ChatMessage(session_id=session.id, role="user", content=body.query))
     await db.commit()
 
-    agent_result = await run_agent(query=body.query, history=history)
-    full_answer = agent_result["answer"]
+    result = await run_agent(query=body.query, history=history)
 
-    # 保存助手消息
-    assistant_msg = ChatMessage(
+    db.add(ChatMessage(
         session_id=session.id,
         role="assistant",
-        content=full_answer,
-        citations=json.dumps(agent_result["citations"], ensure_ascii=False),
-    )
-    db.add(assistant_msg)
+        content=result["answer"],
+        citations=json.dumps(result["citations"], ensure_ascii=False),
+    ))
     await db.commit()
 
-    async def generate():
-        # 模拟流式（逐词输出）
-        for word in full_answer:
+    # 模拟流式逐词输出
+    async def stream():
+        for word in result["answer"]:
             yield word
-        # 最后发 citations
-        yield "\n\n__CITATIONS__:" + json.dumps(agent_result["citations"], ensure_ascii=False)
+        yield "\n\n__CITATIONS__: " + json.dumps(result["citations"], ensure_ascii=False)
 
-    return StreamingResponse(generate(), media_type="text/plain")
+    return StreamingResponse(stream(), media_type="text/plain")
 
 
-# ── 反馈 ──
+@router.post("/feedback/{message_id}")
+async def feedback(message_id: str, fb: str = "like", db: AsyncSession = Depends(get_db)):
+    if fb not in ("like", "dislike"):
+        raise HTTPException(400, "feedback 只能是 like 或 dislike")
 
-@router.post("/chat/{message_id}/feedback")
-async def submit_feedback(
-    message_id: str,
-    feedback: str,  # like or dislike
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(
-        select(ChatMessage).where(ChatMessage.id == message_id)
-    )
+    result = await db.execute(select(ChatMessage).where(ChatMessage.id == message_id))
     msg = result.scalar_one_or_none()
     if not msg:
         raise HTTPException(404, "消息不存在")
-    if feedback not in ("like", "dislike"):
-        raise HTTPException(400, "feedback 必须是 like 或 dislike")
-    msg.feedback = feedback
-    await db.commit()
-    return {"message": "反馈提交成功"}
 
-
-async def _get_or_create_session(session_id: str | None, db: AsyncSession) -> ChatSession:
-    if session_id:
-        result = await db.execute(
-            select(ChatSession).where(ChatSession.id == session_id)
-        )
-        session = result.scalar_one_or_none()
-        if session:
-            return session
-    session = ChatSession(title="新对话")
-    db.add(session)
+    msg.feedback = fb
     await db.commit()
-    await db.refresh(session)
-    return session
+    return {"message": "反馈已记录"}
