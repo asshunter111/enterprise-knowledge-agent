@@ -1,31 +1,19 @@
-# 核心框架
-fastapi>=0.115.0
-uvicorn[standard]>=0.30.0
+fastapi>=0.115.0,<1.0
+uvicorn[standard]>=0.34.0,<1.0
+python-multipart>=0.0.18
+aiofiles>=24.1.0
+pydantic-settings>=2.7.0
 
-# LLM & RAG
-langchain>=0.3.0
-langchain-core>=0.3.0
-langchain-openai>=0.2.0
-langchain-text-splitters>=0.0.1
-langgraph>=0.2.0
-chromadb>=0.5.0
+langgraph>=0.4.0,<2.0
+langchain-core>=0.3.0,<2.0
+langchain-openai>=0.3.0,<2.0
+langchain-text-splitters>=0.3.0,<2.0
+chromadb>=0.6.0,<2.0
+sentence-transformers>=3.4.0,<6.0
 
-# 文档解析
-pymupdf>=1.24.0
+pymupdf>=1.25.0
 python-docx>=1.1.0
 
-# 数据库
-sqlalchemy[asyncio]>=2.0.30
+sqlalchemy[asyncio]>=2.0.36
 aiosqlite>=0.20.0
-asyncmy>=0.2.9
-
-# 异步 HTTP
-httpx>=0.27.0
-
-# 重排序（可选）
-FlagEmbedding>=1.2.0
-
-# 工具
-python-multipart>=0.0.9
-pydantic>=2.7.0
-python-dotenv>=1.0.0
+aiomysql>=0.2.0

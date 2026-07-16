@@ -1,96 +1,71 @@
-"""文档解析 — PDF/Word/TXT/表格提取"""
 from pathlib import Path
-from typing import List
 
 import pymupdf
 from docx import Document as DocxDocument
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from app.config import CHUNK_SIZE, CHUNK_OVERLAP
+from app.config import get_settings
+
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
 
 
-def parse_document(file_path: Path) -> str:
-    ext = file_path.suffix.lower()
-
-    if ext == ".pdf":
-        return _parse_pdf(file_path)
-    if ext in (".docx", ".doc"):
-        return _parse_docx(file_path)
-    if ext in (".txt", ".md"):
-        return file_path.read_text(encoding="utf-8")
-
-    raise ValueError(f"不支持的文件类型: {ext}")
+def parse_document(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        return _parse_pdf(path)
+    if suffix == ".docx":
+        return _parse_docx(path)
+    if suffix in {".txt", ".md"}:
+        return path.read_text(encoding="utf-8")
+    raise ValueError(f"unsupported file type: {suffix}")
 
 
-def chunk_text(text: str, meta: dict = None) -> List[dict]:
-    """把长文本切成适合检索的小块"""
+def chunk_text(text: str) -> list[dict]:
+    settings = get_settings()
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
+        chunk_size=settings.chunk_size,
+        chunk_overlap=settings.chunk_overlap,
         separators=["\n\n", "\n", "。", ".", "；", ";", "，", ",", " ", ""],
     )
-    chunks = splitter.split_text(text)
-
-    base_meta = meta or {}
-    result = []
-    for i, chunk in enumerate(chunks):
-        result.append({
-            "content": chunk,
-            "metadata": {**base_meta, "chunk_index": i, "chunk_total": len(chunks)},
-        })
-    return result
+    pieces = [piece.strip() for piece in splitter.split_text(text) if piece.strip()]
+    return [
+        {
+            "content": piece,
+            "metadata": {"chunk_index": index, "chunk_total": len(pieces)},
+        }
+        for index, piece in enumerate(pieces)
+    ]
 
 
 def _parse_pdf(path: Path) -> str:
-    doc = pymupdf.open(path)
-    parts = []
-
-    for page in doc:
-        text = page.get_text()
-        if text.strip():
-            parts.append(text)
-
-        # 表格提取
-        tables = page.find_tables()
-        for tbl in tables:
-            rows = tbl.extract()
-            if rows:
-                md_rows = []
-                for ri, row in enumerate(rows):
-                    cells = [str(c) if c else "" for c in row]
-                    md_rows.append("| " + " | ".join(cells) + " |")
-                    if ri == 0:
-                        md_rows.append("|" + "|".join(["---"] * len(row)) + "|")
-                parts.append("\n".join(md_rows))
-
-    doc.close()
+    parts: list[str] = []
+    with pymupdf.open(path) as document:
+        for page in document:
+            text = page.get_text().strip()
+            if text:
+                parts.append(text)
+            for table in page.find_tables():
+                rows = table.extract()
+                if rows:
+                    parts.append(_rows_to_markdown(rows))
     return "\n\n".join(parts)
 
 
 def _parse_docx(path: Path) -> str:
-    doc = DocxDocument(path)
-    parts = []
-
-    for para in doc.paragraphs:
-        text = para.text.strip()
-        if not text:
-            continue
-        # 标题层级转 markdown
-        style = para.style.name
-        if style.startswith("Heading"):
-            level = style.split()[-1]
-            prefix = "#" * int(level) if level.isdigit() else "#"
-            parts.append(f"{prefix} {text}")
-        else:
-            parts.append(text)
-
-    # 提取表格
-    for table in doc.tables:
-        rows = []
-        for row in table.rows:
-            cells = [cell.text.strip() for cell in row.cells]
-            rows.append("| " + " | ".join(cells) + " |")
+    document = DocxDocument(path)
+    parts = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
+    for table in document.tables:
+        rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
         if rows:
-            parts.append("\n".join(rows))
-
+            parts.append(_rows_to_markdown(rows))
     return "\n\n".join(parts)
+
+
+def _rows_to_markdown(rows: list[list]) -> str:
+    normalized = [[str(cell or "") for cell in row] for row in rows]
+    if not normalized:
+        return ""
+    output = ["| " + " | ".join(normalized[0]) + " |"]
+    output.append("| " + " | ".join(["---"] * len(normalized[0])) + " |")
+    output.extend("| " + " | ".join(row) + " |" for row in normalized[1:])
+    return "\n".join(output)

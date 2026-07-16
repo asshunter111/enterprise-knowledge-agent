@@ -1,29 +1,47 @@
-version: "3.8"
-
 services:
-  app:
-    build: .
-    ports:
-      - "8000:8000"
-    env_file:
-      - .env
-    volumes:
-      - ./uploads:/app/uploads
-      - ./chroma_data:/app/chroma_data
-    restart: unless-stopped
-
-  # MySQL（可选，生产环境使用）
   mysql:
-    image: mysql:8.0
+    image: mysql:8.4
     environment:
-      MYSQL_ROOT_PASSWORD: rag_password
       MYSQL_DATABASE: rag_db
-    ports:
-      - "3306:3306"
+      MYSQL_USER: rag
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-rag_password}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
     volumes:
       - mysql_data:/var/lib/mysql
-    profiles:
-      - production
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-urag", "-p${MYSQL_PASSWORD:-rag_password}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: mysql+aiomysql://rag:${MYSQL_PASSWORD:-rag_password}@mysql:3306/rag_db?charset=utf8mb4
+      UPLOAD_DIR: /app/data/uploads
+      CHROMA_PERSIST_DIR: /app/data/chroma
+      EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-hash}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-small-zh-v1.5}
+      RERANK_BACKEND: ${RERANK_BACKEND:-lexical}
+      RERANK_MODEL: ${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
+      APP_API_KEY: ${APP_API_KEY:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    ports:
+      - "8000:8000"
+    volumes:
+      - uploads:/app/data/uploads
+      - chroma_data:/app/data/chroma
+      - model_cache:/root/.cache/huggingface
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   mysql_data:
+  uploads:
+  chroma_data:
+  model_cache:

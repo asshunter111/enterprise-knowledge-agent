@@ -1,90 +1,104 @@
-"""向量数据库操作 — ChromaDB"""
-import uuid
-from typing import List
+import asyncio
+from functools import lru_cache
 
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 
-from app.config import CHROMA_PERSIST_DIR, CHROMA_COLLECTION
-from app.core.embedding import embed_texts
-
-_client = None
-_collection = None
+from app.config import Settings, get_settings
 
 
-def _get_collection():
-    global _client, _collection
-    if _client is None:
-        _client = chromadb.PersistentClient(
-            path=CHROMA_PERSIST_DIR,
-            settings=ChromaSettings(anonymized_telemetry=False),
+class VectorStore:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self._client = None
+        self._collection = None
+
+    def _get_collection(self):
+        if self._collection is None:
+            self.settings.prepare_directories()
+            self._client = chromadb.PersistentClient(
+                path=str(self.settings.chroma_persist_dir),
+                settings=ChromaSettings(anonymized_telemetry=False),
+            )
+            self._collection = self._client.get_or_create_collection(
+                name=self.settings.chroma_collection,
+                metadata={"hnsw:space": "cosine"},
+            )
+        return self._collection
+
+    async def upsert(
+        self,
+        chunks: list[dict],
+        embeddings: list[list[float]],
+        document_id: str,
+        document_name: str,
+    ) -> int:
+        return await asyncio.to_thread(
+            self._upsert_sync, chunks, embeddings, document_id, document_name
         )
-        _collection = _client.get_or_create_collection(
-            name=CHROMA_COLLECTION,
-            metadata={"hnsw:space": "cosine"},
+
+    def _upsert_sync(
+        self,
+        chunks: list[dict],
+        embeddings: list[list[float]],
+        document_id: str,
+        document_name: str,
+    ) -> int:
+        if not chunks:
+            return 0
+        collection = self._get_collection()
+        collection.upsert(
+            ids=[f"{document_id}:{chunk['metadata']['chunk_index']}" for chunk in chunks],
+            embeddings=embeddings,
+            documents=[chunk["content"] for chunk in chunks],
+            metadatas=[
+                {
+                    "document_id": document_id,
+                    "document_name": document_name,
+                    "chunk_index": chunk["metadata"]["chunk_index"],
+                    "chunk_total": chunk["metadata"]["chunk_total"],
+                }
+                for chunk in chunks
+            ],
         )
-    return _collection
+        return len(chunks)
+
+    async def search(self, embedding: list[float], top_k: int) -> list[dict]:
+        return await asyncio.to_thread(self._search_sync, embedding, top_k)
+
+    def _search_sync(self, embedding: list[float], top_k: int) -> list[dict]:
+        collection = self._get_collection()
+        count = collection.count()
+        if count == 0:
+            return []
+        result = collection.query(
+            query_embeddings=[embedding],
+            n_results=min(top_k, count),
+            include=["documents", "metadatas", "distances"],
+        )
+        return [
+            {
+                "id": result["ids"][0][index],
+                "content": result["documents"][0][index],
+                "metadata": result["metadatas"][0][index],
+                "score": max(0.0, 1.0 - result["distances"][0][index]),
+            }
+            for index in range(len(result["ids"][0]))
+        ]
+
+    async def delete_document(self, document_id: str) -> None:
+        await asyncio.to_thread(self._delete_document_sync, document_id)
+
+    def _delete_document_sync(self, document_id: str) -> None:
+        self._get_collection().delete(where={"document_id": document_id})
+
+    async def count(self) -> int:
+        return await asyncio.to_thread(self._count_sync)
+
+    def _count_sync(self) -> int:
+        return self._get_collection().count()
 
 
-async def add_chunks(chunks: list, doc_id: str, doc_name: str) -> int:
-    """将文档分块存入向量库，返回存入数量"""
-    collection = _get_collection()
-    texts = [c["content"] for c in chunks]
-    embeddings = await embed_texts(texts)
-
-    ids = [str(uuid.uuid4()) for _ in chunks]
-    metadatas = [
-        {
-            **c["metadata"],
-            "doc_id": doc_id,
-            "doc_name": doc_name,
-        }
-        for c in chunks
-    ]
-
-    collection.add(
-        ids=ids,
-        embeddings=embeddings,
-        documents=texts,
-        metadatas=metadatas,
-    )
-    return len(ids)
-
-
-async def search(query_embedding: List[float], top_k: int = 10) -> List[dict]:
-    """向量相似度检索"""
-    collection = _get_collection()
-    results = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=top_k,
-        include=["documents", "metadatas", "distances"],
-    )
-    if not results["ids"][0]:
-        return []
-
-    return [
-        {
-            "id": results["ids"][0][i],
-            "content": results["documents"][0][i],
-            "metadata": results["metadatas"][0][i],
-            "score": 1 - results["distances"][0][i],  # cosine距离→相似度
-        }
-        for i in range(len(results["ids"][0]))
-    ]
-
-
-async def delete_by_doc_id(doc_id: str):
-    """删除指定文档的所有向量"""
-    collection = _get_collection()
-    existing = collection.get(where={"doc_id": doc_id})
-    if existing["ids"]:
-        collection.delete(ids=existing["ids"])
-
-
-async def get_collection_stats() -> dict:
-    """获取集合统计"""
-    collection = _get_collection()
-    return {
-        "name": collection.name,
-        "count": collection.count(),
-    }
+@lru_cache
+def get_vector_store() -> VectorStore:
+    return VectorStore(get_settings())

@@ -1,44 +1,63 @@
-"""企业知识库智能问答 Agent — 应用配置"""
-import os
+from functools import lru_cache
 from pathlib import Path
-from dotenv import load_dotenv
+from typing import Annotated
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR / ".env")
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-# ── LLM 配置 ──
-LLM_API_KEY = os.getenv("LLM_API_KEY", "your-deepseek-api-key")
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com")
-LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
 
-# ── Embedding 配置 ──
-EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", LLM_API_KEY)
-EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", LLM_BASE_URL)
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-# ── 向量数据库 ──
-CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", str(BASE_DIR / "chroma_data"))
-CHROMA_COLLECTION = os.getenv("CHROMA_COLLECTION", "enterprise_docs")
+    app_name: str = "Enterprise RAG Agent"
+    database_url: str = "sqlite+aiosqlite:///./data/app.db"
+    upload_dir: Path = Path("./data/uploads")
+    max_upload_size_mb: int = 20
 
-# ── 数据库（MySQL / SQLite） ──
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "sqlite+aiosqlite:///" + str(BASE_DIR / "app.db")
-)
-# MySQL 示例: "mysql+asyncmy://user:pass@localhost:3306/rag_db"
+    chroma_persist_dir: Path = Path("./data/chroma")
+    chroma_collection: str = "enterprise_docs_v2"
+    chunk_size: int = 800
+    chunk_overlap: int = 150
 
-# ── 检索配置 ──
-CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "800"))
-CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "150"))
-RETRIEVAL_TOP_K = int(os.getenv("RETRIEVAL_TOP_K", "10"))
-RERANK_TOP_K = int(os.getenv("RERANK_TOP_K", "5"))
-USE_RERANKER = os.getenv("USE_RERANKER", "true").lower() == "true"
+    embedding_backend: str = "hash"
+    embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    embedding_dimension: int = 384
 
-# ── 文件上传 ──
-UPLOAD_DIR = BASE_DIR / "uploads"
-MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20MB
-ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt", ".md"}
+    rerank_backend: str = "lexical"
+    rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    retrieval_top_k: int = 10
+    rerank_top_k: int = 5
+    min_relevance_score: float = 0.05
 
-# ── 服务 ──
-HOST = os.getenv("HOST", "0.0.0.0")
-PORT = int(os.getenv("PORT", "8000"))
+    llm_api_key: str | None = None
+    llm_base_url: str | None = "https://api.deepseek.com"
+    llm_model: str = "deepseek-chat"
+
+    app_api_key: str | None = None
+    cors_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["http://localhost:3000", "http://127.0.0.1:3000"]
+    )
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_origins(cls, value):
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @property
+    def max_upload_size_bytes(self) -> int:
+        return self.max_upload_size_mb * 1024 * 1024
+
+    def prepare_directories(self) -> None:
+        self.upload_dir.mkdir(parents=True, exist_ok=True)
+        self.chroma_persist_dir.mkdir(parents=True, exist_ok=True)
+        if self.database_url.startswith("sqlite"):
+            Path(self.database_url.removeprefix("sqlite+aiosqlite:///")).parent.mkdir(
+                parents=True, exist_ok=True
+            )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

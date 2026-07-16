@@ -1,88 +1,153 @@
-"""Agent workflow — LangGraph orchestration"""
-from typing import List, TypedDict, Annotated
 import operator
+from functools import lru_cache
+from typing import Annotated, TypedDict
 
-from langgraph.graph import StateGraph, END
+from langgraph.graph import END, START, StateGraph
 
-from app.core.retriever import retrieve_with_rerank
-from app.core.generator import generate_answer
+from app.config import Settings, get_settings
+from app.core.generator import AnswerGenerator, get_answer_generator
+from app.core.retriever import Retriever, get_retriever
 
 
-class AgentState(TypedDict):
+class AgentState(TypedDict, total=False):
     query: str
-    history: List[dict]
-    retrieved_docs: List[dict]
+    history: list[dict]
+    candidates: list[dict]
+    documents: list[dict]
     answer: str
-    citations: List[dict]
-    steps: Annotated[List[str], operator.add]
+    citations: list[dict]
+    trace: Annotated[list[str], operator.add]
 
 
-async def step_retrieve(state: AgentState) -> AgentState:
-    docs = await retrieve_with_rerank(state["query"])
-    return {
-        "retrieved_docs": docs,
-        "steps": [f"检索到 {len(docs)} 个相关片段"],
-    }
+class EnterpriseRAGAgent:
+    def __init__(
+        self,
+        settings: Settings,
+        retriever: Retriever,
+        generator: AnswerGenerator,
+    ) -> None:
+        self.settings = settings
+        self.retriever = retriever
+        self.generator = generator
+        self.graph = self._build_graph()
+        self.context_graph = self._build_context_graph()
 
+    def _build_graph(self):
+        graph = StateGraph(AgentState)
+        graph.add_node("retrieve", self._retrieve)
+        graph.add_node("verify", self._verify)
+        graph.add_node("rerank", self._rerank)
+        graph.add_node("generate", self._generate)
+        graph.add_node("no_context", self._no_context)
+        graph.add_edge(START, "retrieve")
+        graph.add_edge("retrieve", "verify")
+        graph.add_conditional_edges(
+            "verify",
+            self._route_after_verify,
+            {"rerank": "rerank", "no_context": "no_context"},
+        )
+        graph.add_edge("rerank", "generate")
+        graph.add_edge("generate", END)
+        graph.add_edge("no_context", END)
+        return graph.compile()
 
-async def step_generate(state: AgentState) -> AgentState:
-    docs = state.get("retrieved_docs", [])
-    if not docs:
+    def _build_context_graph(self):
+        graph = StateGraph(AgentState)
+        graph.add_node("retrieve", self._retrieve)
+        graph.add_node("verify", self._verify)
+        graph.add_node("rerank", self._rerank)
+        graph.add_node("no_context", self._no_context)
+        graph.add_edge(START, "retrieve")
+        graph.add_edge("retrieve", "verify")
+        graph.add_conditional_edges(
+            "verify",
+            self._route_after_verify,
+            {"rerank": "rerank", "no_context": "no_context"},
+        )
+        graph.add_edge("rerank", END)
+        graph.add_edge("no_context", END)
+        return graph.compile()
+
+    async def run(self, query: str, history: list[dict] | None = None) -> dict:
+        state = await self.graph.ainvoke(self._initial_state(query, history))
         return {
-            "answer": "抱歉，知识库中暂无相关信息，请上传更多文档后重试。",
-            "citations": [],
-            "steps": ["未找到相关文档"],
+            "answer": state.get("answer", "资料中未找到相关信息。"),
+            "citations": state.get("citations", []),
+            "trace": state.get("trace", []),
+            "retrieved_count": len(state.get("documents", [])),
         }
 
-    result = await generate_answer(
-        query=state["query"],
-        retrieved_docs=docs,
-        history=state.get("history"),
-    )
-    return {
-        "answer": result["answer"],
-        "citations": result["citations"],
-        "steps": ["回答生成完成"],
-    }
+    async def prepare_stream(self, query: str, history: list[dict] | None = None) -> dict:
+        state = await self.context_graph.ainvoke(self._initial_state(query, history))
+        return {
+            "documents": state.get("documents", []),
+            "citations": self.generator.build_citations(state.get("documents", [])),
+            "trace": state.get("trace", []),
+        }
+
+    async def _retrieve(self, state: AgentState) -> dict:
+        candidates = await self.retriever.retrieve(state["query"])
+        return {
+            "candidates": candidates,
+            "trace": [f"retrieve: {len(candidates)} candidates"],
+        }
+
+    async def _verify(self, state: AgentState) -> dict:
+        candidates = [
+            item
+            for item in state.get("candidates", [])
+            if item.get("score", 0.0) >= self.settings.min_relevance_score
+        ]
+        return {
+            "candidates": candidates,
+            "trace": [f"verify: {len(candidates)} candidates passed threshold"],
+        }
+
+    async def _rerank(self, state: AgentState) -> dict:
+        documents = await self.retriever.reranker.rerank(
+            state["query"], state.get("candidates", [])
+        )
+        return {
+            "documents": documents,
+            "trace": [f"rerank: selected {len(documents)} chunks"],
+        }
+
+    async def _generate(self, state: AgentState) -> dict:
+        result = await self.generator.generate(
+            state["query"], state.get("documents", []), state.get("history", [])
+        )
+        return {
+            "answer": result["answer"],
+            "citations": result["citations"],
+            "trace": ["generate: answer completed"],
+        }
+
+    @staticmethod
+    async def _no_context(_: AgentState) -> dict:
+        return {
+            "documents": [],
+            "answer": "资料中未找到相关信息。",
+            "citations": [],
+            "trace": ["no_context: no reliable evidence"],
+        }
+
+    @staticmethod
+    def _route_after_verify(state: AgentState) -> str:
+        return "rerank" if state.get("candidates") else "no_context"
+
+    @staticmethod
+    def _initial_state(query: str, history: list[dict] | None) -> AgentState:
+        return {
+            "query": query,
+            "history": history or [],
+            "candidates": [],
+            "documents": [],
+            "answer": "",
+            "citations": [],
+            "trace": [],
+        }
 
 
-def build_graph():
-    """构建检索→生成两阶段工作流，保持简单"""
-    wf = StateGraph(AgentState)
-
-    wf.add_node("retrieve", step_retrieve)
-    wf.add_node("generate", step_generate)
-
-    wf.set_entry_point("retrieve")
-    wf.add_edge("retrieve", "generate")
-    wf.add_edge("generate", END)
-
-    return wf.compile()
-
-
-_agent = None
-
-
-def get_agent():
-    global _agent
-    if _agent is None:
-        _agent = build_graph()
-    return _agent
-
-
-async def run_agent(query: str, history: List[dict] = None) -> dict:
-    agent = get_agent()
-    result = await agent.ainvoke({
-        "query": query,
-        "history": history or [],
-        "retrieved_docs": [],
-        "answer": "",
-        "citations": [],
-        "steps": [],
-    })
-    return {
-        "answer": result["answer"],
-        "citations": result["citations"],
-        "steps": result["steps"],
-        "retrieved_count": len(result.get("retrieved_docs", [])),
-    }
+@lru_cache
+def get_agent() -> EnterpriseRAGAgent:
+    return EnterpriseRAGAgent(get_settings(), get_retriever(), get_answer_generator())
