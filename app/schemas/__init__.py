@@ -35,7 +35,7 @@ class SessionOut(BaseModel):
 class Citation(BaseModel):
     index: int
     doc_name: str
-    chunk_index: int
+    chunk_index: int = 0
     content_preview: str
     score: float
 

@@ -1,8 +1,10 @@
 """企业知识库智能问答 Agent — 应用配置"""
 import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 
 # ── LLM 配置 ──
 LLM_API_KEY = os.getenv("LLM_API_KEY", "your-deepseek-api-key")
