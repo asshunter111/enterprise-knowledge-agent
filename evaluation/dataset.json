@@ -1,0 +1,185 @@
+[
+  {
+    "id": "q01",
+    "question": "兰州是哪个省的省会？",
+    "expected_document": "company_basic.md",
+    "expected_keywords": ["兰州", "甘肃省"]
+  },
+  {
+    "id": "q02",
+    "question": "甘肃省的省会城市是哪一个？",
+    "expected_document": "company_basic.md",
+    "expected_keywords": ["兰州"]
+  },
+  {
+    "id": "q03",
+    "question": "兰州在我国哪个地区具有重要地位？",
+    "expected_document": "company_basic.md",
+    "expected_keywords": ["西北地区"]
+  },
+  {
+    "id": "q04",
+    "question": "企业级RAG系统通常包含哪些主要环节？",
+    "expected_document": "ai_rag.md",
+    "expected_keywords": [
+      "文档解析",
+      "文本切分",
+      "Embedding",
+      "向量检索",
+      "重排序",
+      "生成"
+    ]
+  },
+  {
+    "id": "q05",
+    "question": "RAG系统中的Embedding主要用于什么？",
+    "expected_document": "ai_rag.md",
+    "expected_keywords": ["向量"]
+  },
+  {
+    "id": "q06",
+    "question": "员工报销需要在费用发生后多久提交？",
+    "expected_document": "finance_policy.md",
+    "expected_keywords": ["十个工作日"]
+  },
+  {
+    "id": "q07",
+    "question": "费用发生以后，报销申请的提交期限是多少？",
+    "expected_document": "finance_policy.md",
+    "expected_keywords": ["十个工作日"]
+  },
+  {
+    "id": "q08",
+    "question": "兰州有多少所大学？",
+    "expected_document": null,
+    "expected_keywords": []
+  },
+  {
+    "id": "q09",
+    "question": "公司今年的营业收入是多少？",
+    "expected_document": null,
+    "expected_keywords": []
+  },
+  {
+    "id": "q10",
+    "question": "员工可以报销哪些费用？",
+    "expected_document": null,
+    "expected_keywords": []
+  },
+  {
+  "id": "q11",
+  "question": "A组的排班情况怎么样？",
+  "expected_document": "schedule.md",
+  "expected_keywords": ["A组", "上午班"]
+},
+{
+  "id": "q12",
+  "question": "那么B组呢？",
+  "history": [
+    {
+      "role": "user",
+      "content": "A组的排班情况怎么样？"
+    },
+    {
+      "role": "assistant",
+      "content": "A组本周负责上午班次。"
+    }
+  ],
+  "rewritten_query": "B组的排班情况怎么样？",
+  "expected_document": "schedule.md",
+  "expected_keywords": ["B组", "下午班"]
+},
+{
+  "id": "q13",
+  "question": "第二条的对象是谁？",
+  "history": [
+    {
+      "role": "user",
+      "content": "排班规则是什么？"
+    },
+    {
+      "role": "assistant",
+      "content": "1. 员工排班由项目负责人统一安排。\n2. 各小组原则上按照既定班次执行工作安排。\n3. 如果员工需要调整班次，应提前向项目负责人申请。\n4. 未经批准不得自行更换排班。"
+    }
+  ],
+  "rewritten_query": "排班规则中，各小组原则上按照既定班次执行工作安排，这一条的对象是谁？",
+  "expected_document": "schedule.md",
+  "expected_keywords": ["各小组"]
+},
+{
+  "id": "q14",
+  "question": "这个需要提前申请吗？",
+  "history": [
+    {
+      "role": "user",
+      "content": "员工如果需要调整排班怎么办？"
+    },
+    {
+      "role": "assistant",
+      "content": "如果员工需要调整班次，应提前向项目负责人申请。"
+    }
+  ],
+  "rewritten_query": "员工调整班次是否需要提前向项目负责人申请？",
+  "expected_document": "schedule.md",
+  "expected_keywords": ["提前", "申请"]
+},
+{
+  "id": "q15",
+  "question": "那他需要提前做什么？",
+  "history": [
+    {
+      "role": "user",
+      "content": "如果员工需要调整班次怎么办？"
+    },
+    {
+      "role": "assistant",
+      "content": "如果员工需要调整班次，应提前向项目负责人申请。"
+    }
+  ],
+  "rewritten_query": "如果员工需要调整班次，需要提前向项目负责人申请什么？",
+  "expected_document": "schedule.md",
+  "expected_keywords": ["申请"]
+},
+{
+  "id": "q16",
+  "question": "那么B组呢？",
+  "history": [
+    {
+      "role": "user",
+      "content": "A组的排班情况怎么样？"
+    },
+    {
+      "role": "assistant",
+      "content": "A组本周负责上午班次。"
+    }
+  ],
+  "rewritten_query": "B组的排班情况怎么样？",
+  "expected_document": "schedule.md",
+  "expected_keywords": ["B组", "下午班"]
+},
+{
+  "id": "q17",
+  "question": "第二条具体是谁负责？",
+  "history": [
+    {
+      "role": "user",
+      "content": "A组的排班情况怎么样？"
+    },
+    {
+      "role": "assistant",
+      "content": "A组本周负责上午班次。"
+    },
+    {
+      "role": "user",
+      "content": "那么B组呢？"
+    },
+    {
+      "role": "assistant",
+      "content": "1. B组本周负责下午班次。\n2. 周一B组安排陈晨、刘洋负责下午值班。"
+    }
+  ],
+  "rewritten_query": "B组周一下午班由哪些人负责？",
+  "expected_document": "schedule.md",
+  "expected_keywords": ["陈晨", "刘洋"]
+}
+]
