@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 from importlib import import_module
 
+from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -32,3 +33,14 @@ async def init_db() -> None:
     import_module("app.models")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        await connection.run_sync(_add_missing_columns)
+
+
+def _add_missing_columns(connection) -> None:
+    """create_all 只建新表，不会给已存在的表补列，老库需要单独升级。"""
+
+    if "chat_sessions" not in inspect(connection).get_table_names():
+        return
+    existing = {column["name"] for column in inspect(connection).get_columns("chat_sessions")}
+    if "active_context" not in existing:
+        connection.execute(text("ALTER TABLE chat_sessions ADD COLUMN active_context JSON"))

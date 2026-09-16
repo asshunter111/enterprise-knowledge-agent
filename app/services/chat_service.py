@@ -40,8 +40,9 @@ class ChatService:
             return True
 
     async def answer(self, session_id: str | None, query: str) -> dict:
-        chat_session, history = await self.begin_exchange(session_id, query)
-        result = await self.agent.run(query, history)
+        chat_session, history, active_context = await self.begin_exchange(session_id, query)
+        result = await self.agent.run(query, history, active_context)
+        await self.save_active_context(chat_session.id, result.get("active_context"))
         message = await self.save_assistant_message(
             chat_session.id, result["answer"], result["citations"], result["trace"]
         )
@@ -49,16 +50,26 @@ class ChatService:
 
     async def begin_exchange(
         self, session_id: str | None, query: str
-    ) -> tuple[ChatSession, list[dict]]:
+    ) -> tuple[ChatSession, list[dict], dict | None]:
         async with self.session_factory() as session:
             chat_session = await self._get_or_create_session(session, session_id)
             history = await self._load_history(session, chat_session.id)
+            active_context = chat_session.active_context
             session.add(ChatMessage(session_id=chat_session.id, role="user", content=query))
             if chat_session.title == "新对话":
                 chat_session.title = query[:40]
             chat_session.updated_at = datetime.now(UTC)
             await session.commit()
-            return chat_session, history
+            return chat_session, history, active_context
+
+    async def save_active_context(self, session_id: str, active_context: dict | None) -> None:
+        async with self.session_factory() as session:
+            chat_session = await session.get(ChatSession, session_id)
+            if chat_session is None:
+                return
+            chat_session.active_context = active_context
+            chat_session.updated_at = datetime.now(UTC)
+            await session.commit()
 
     async def save_assistant_message(
         self,

@@ -40,21 +40,28 @@ async def chat(body: ChatRequest, service: ChatServiceDep):
 @router.post("/chat/stream")
 async def chat_stream(body: ChatRequest, service: ChatServiceDep) -> StreamingResponse:
     try:
-        chat_session, history = await service.begin_exchange(body.session_id, body.query)
+        chat_session, history, active_context = await service.begin_exchange(
+            body.session_id, body.query
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    prepared = await service.agent.prepare_stream(body.query, history)
+    prepared = await service.agent.prepare_stream(body.query, history, active_context)
+    await service.save_active_context(chat_session.id, prepared.get("active_context"))
 
     async def event_stream() -> AsyncIterator[str]:
         yield _sse("meta", {"session_id": chat_session.id, "trace": prepared["trace"]})
         chunks: list[str] = []
         try:
-            async for token in service.agent.generator.stream(
-                body.query, prepared["documents"], history
-            ):
-                chunks.append(token)
-                yield _sse("token", {"text": token})
+            if prepared.get("direct_answer"):
+                chunks.append(prepared["direct_answer"])
+                yield _sse("token", {"text": prepared["direct_answer"]})
+            else:
+                async for token in service.agent.generator.stream(
+                    body.query, prepared["documents"], history
+                ):
+                    chunks.append(token)
+                    yield _sse("token", {"text": token})
         except Exception as exc:
             yield _sse("error", {"message": str(exc)})
             return
