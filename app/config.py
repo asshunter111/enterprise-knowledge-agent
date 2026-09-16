@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     rerank_top_k: int = 5
     min_relevance_score: float = 0.05
 
+    # 上下文解析只喂最近 N 轮，避免历史无限增长
+    context_history_turns: int = 5
+
     llm_api_key: str | None = None
     llm_base_url: str | None = "https://api.deepseek.com"
     llm_model: str = "deepseek-chat"
