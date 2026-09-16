@@ -181,5 +181,108 @@
   "rewritten_query": "B组周一下午班由哪些人负责？",
   "expected_document": "schedule.md",
   "expected_keywords": ["陈晨", "刘洋"]
+},
+{
+  "id": "q18",
+  "mode": "direct",
+  "question": "你好",
+  "history": [],
+  "expected_document": null,
+  "expected_keywords": []
+},
+{
+  "id": "q19",
+  "mode": "independent",
+  "question": "员工报销需要在费用发生后多久提交？",
+  "history": [],
+  "expected_document": "finance_policy.md",
+  "expected_keywords": ["十个工作日"]
+},
+{
+  "id": "q20",
+  "mode": "new_intent",
+  "question": "报销期限是多少？",
+  "history": [
+    {
+      "role": "user",
+      "content": "A组的排班情况怎么样？"
+    },
+    {
+      "role": "assistant",
+      "content": "A组本周负责上午班次。"
+    }
+  ],
+  "active_context": {
+    "intent": "schedule_query",
+    "slots": {"group": "A组"}
+  },
+  "expected_intent": "finance_policy",
+  "expected_context_slots": {"policy_type": "expense_reimbursement"},
+  "rewritten_query": "员工报销需要在费用发生后多久提交？",
+  "expected_document": "finance_policy.md",
+  "expected_keywords": ["十个工作日"]
+},
+{
+  "id": "q21",
+  "mode": "rewrite_failure",
+  "question": "那么B组呢？",
+  "history": [
+    {
+      "role": "user",
+      "content": "A组的排班情况怎么样？"
+    },
+    {
+      "role": "assistant",
+      "content": "A组本周负责上午班次。"
+    }
+  ],
+  "resolver_error": "resolver unavailable",
+  "rewritten_query": null,
+  "expected_document": "schedule.md",
+  "expected_keywords": ["B组"]
+},
+{
+  "id": "q22",
+  "mode": "dedup",
+  "question": "那么B组呢？",
+  "history": [
+    {
+      "role": "user",
+      "content": "A组的排班情况怎么样？"
+    },
+    {
+      "role": "assistant",
+      "content": "A组本周负责上午班次。"
+    }
+  ],
+  "rewritten_query": "B组的排班情况怎么样？",
+  "expected_document": "schedule.md",
+  "expected_keywords": ["B组", "下午班"]
+},
+{
+  "id": "q23",
+  "mode": "cross_turn",
+  "question": "第二条具体是谁负责？",
+  "history": [
+    {
+      "role": "user",
+      "content": "A组的排班情况怎么样？"
+    },
+    {
+      "role": "assistant",
+      "content": "A组本周负责上午班次。"
+    },
+    {
+      "role": "user",
+      "content": "那么B组呢？"
+    },
+    {
+      "role": "assistant",
+      "content": "1. B组本周负责下午班次。\n2. 周一B组安排陈晨、刘洋负责下午值班。"
+    }
+  ],
+  "rewritten_query": "B组周一下午班由哪些人负责？",
+  "expected_document": "schedule.md",
+  "expected_keywords": ["陈晨", "刘洋"]
 }
 ]
