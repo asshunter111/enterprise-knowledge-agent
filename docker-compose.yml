@@ -20,6 +20,9 @@ services:
       DATABASE_URL: mysql+aiomysql://rag:${MYSQL_PASSWORD:-rag_password}@mysql:3306/rag_db?charset=utf8mb4
       UPLOAD_DIR: /app/data/uploads
       CHROMA_PERSIST_DIR: /app/data/chroma
+      CHROMA_COLLECTION: ${CHROMA_COLLECTION:-enterprise_docs_v2}
+      CHUNK_SIZE: ${CHUNK_SIZE:-800}
+      CHUNK_OVERLAP: ${CHUNK_OVERLAP:-150}
       EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-hash}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-small-zh-v1.5}
       RERANK_BACKEND: ${RERANK_BACKEND:-lexical}

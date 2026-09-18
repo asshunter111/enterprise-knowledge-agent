@@ -1,3 +1,4 @@
+import re
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -6,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.agent import EnterpriseRAGAgent
 from app.models.session import ChatMessage, ChatSession
+from app.services.memory_service import MemoryService
 
 
 class ChatService:
@@ -13,9 +15,11 @@ class ChatService:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         agent: EnterpriseRAGAgent,
+        memory_service: MemoryService | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.agent = agent
+        self.memory_service = memory_service
 
     async def create_session(self, title: str) -> ChatSession:
         async with self.session_factory() as session:
@@ -39,14 +43,32 @@ class ChatService:
             await session.commit()
             return True
 
-    async def answer(self, session_id: str | None, query: str) -> dict:
+    async def answer(
+        self,
+        session_id: str | None,
+        query: str,
+        user_id: str = "anonymous",
+        role: str = "employee",
+    ) -> dict:
         chat_session, history, active_context = await self.begin_exchange(session_id, query)
-        result = await self.agent.run(query, history, active_context)
+        await self._capture_memory(user_id, query)
+        result = await self.agent.run(query, history, active_context, user_id, role)
         await self.save_active_context(chat_session.id, result.get("active_context"))
         message = await self.save_assistant_message(
             chat_session.id, result["answer"], result["citations"], result["trace"]
         )
         return {"session_id": chat_session.id, "message_id": message.id, **result}
+
+    async def _capture_memory(self, user_id: str, query: str) -> None:
+        if self.memory_service is None:
+            return
+        match = re.search(r"我(?:是|在)([^，。；,.;]+?)(?:部|部门)(?:员工)?", query)
+        if match is None:
+            return
+        try:
+            await self.memory_service.upsert(user_id, "department", f"{match.group(1)}部")
+        except Exception:
+            return
 
     async def begin_exchange(
         self, session_id: str | None, query: str

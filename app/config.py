@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     retrieval_top_k: int = 10
     rerank_top_k: int = 5
     min_relevance_score: float = 0.05
+    memory_retrieval_limit: int = 5
+    evaluation_collection_prefix: str = "evaluation"
+    environment: str = "development"
 
     # 上下文解析只喂最近 N 轮，避免历史无限增长
     context_history_turns: int = 5

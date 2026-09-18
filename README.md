@@ -1,106 +1,139 @@
-# Enterprise RAG Agent
+# Enterprise Knowledge Agent
 
-面向企业文档问答场景的 RAG 服务。系统负责文档上传、解析、分块、向量化、检索、相关性验证、重排序和答案生成，回答会返回实际使用的文档片段，方便核对来源。
+面向企业内部知识库的多轮对话 Agent，支持 RAG 问答、上下文理解、Memory、工具路由和演示级权限控制。
 
-问答接口不是直接拼接 Retriever 和 LLM，而是经过 LangGraph 状态图。多轮上下文处理层放在原有 RAG 流程**前面**，不替换原检索链路：
+`RAG` · `Multi-turn` · `Memory` · `Tool Router` · `RBAC` · `Evaluation`
+
+## 项目简介
+
+这个项目模拟企业员工查询公司制度、排班、报销和行政信息的场景。用户可以上传内部文档，通过对话检索资料并获得带来源的回答，也可以查询演示业务工具或在后续会话中继续使用自己的偏好信息。
+
+系统把多轮上下文处理放在 RAG 流程前面：先判断当前请求是寒暄、独立问题、追问还是新意图，再决定直接回答、恢复上下文、检索文档或调用业务工具。
+
+## 核心功能
+
+### 知识库问答
+
+支持 PDF、DOCX、TXT、Markdown 文档的上传、解析、切分、向量化和 Chroma 存储。检索结果经过相关性检查和 Reranking，回答返回引用片段。
+
+### 多轮对话
+
+系统能处理指代、省略和跨轮引用。例如用户先问“`A组这周怎么排班？`”，再问“`那么B组呢？`”，Context Resolver 会在配置 LLM 时把追问改写成完整的检索问题。
+
+### 双路检索
+
+多轮问题同时使用原始 Query 和改写 Query 召回，按文档片段去重后再验证和排序。改写失败时回落到原始 Query，不会因为没有 LLM 而让接口报错。
+
+### Memory
+
+按 `user_id` 保存和读取用户相关信息，长期 Memory 与短期会话历史分开管理，并且不会作为知识库引用。
+
+### Tool Router
+
+通过确定性规则路由到三个演示工具：查询年假、查询报销状态、查询会议室。当前不是 provider-native Function Calling。
+
+### 权限控制
+
+通过请求头 `X-Role` 演示 `employee`、`hr`、`finance`、`admin` 和 `manager` 角色，在生成回答前过滤受限文档。它不替代 JWT、OAuth 或 SSO。
+
+### API 与反馈
+
+提供普通问答、SSE 流式问答、会话管理、文档状态、点赞/点踩反馈、Memory 和工具 API，并记录请求 Trace。
+
+## 工作流程
 
 ```mermaid
 flowchart LR
     A[用户问题] --> B[Context Router]
-    B -->|寒暄| C[Direct Response]
-    B -->|独立问题| D[Retrieve]
+    B -->|寒暄| C[直接回答]
+    B -->|独立问题| D[RAG 检索]
     B -->|追问 / 新意图| E[Context Resolver]
-    E --> F[Query Assembly]
-    F --> G[Raw Retrieve]
-    F --> H[Rewrite Retrieve]
-    G --> I[Merge / Dedup]
-    H --> I
-    D --> J[Verify]
-    I --> J
-    J -->|有可靠证据| K[Rerank]
-    J -->|无可靠证据| L[No Context]
-    K --> M[Generate]
-    M --> N[答案 + 引用 + Trace]
-    C --> N
-    L --> N
+    B -->|业务查询| F[Tool Router]
+    E --> G[原始 Query + 改写 Query]
+    G --> H[向量检索 / 合并去重]
+    D --> H
+    H --> I[Verify]
+    I --> J[Reranking]
+    J --> K[生成回答]
+    F --> L[工具结果]
+    C --> M[答案]
+    K --> M
+    L --> M
 ```
 
-## 功能
-
-- PDF、DOCX、TXT、Markdown 文档解析
-- 文档分块、Embedding 和 Chroma 向量存储
-- 向量召回、相关性阈值验证和二次重排序
-- LangGraph 检索决策工作流
-- 多轮上下文改写：指代消解、省略补全、跨轮引用和新意图切断
-- 普通问答和真正的 SSE Token 流式输出
-- 多轮会话、最近消息上下文和引用来源
-- 回答点赞/点踩反馈
-- 文档处理状态和失败原因查询
-- SQLite 本地运行，MySQL + Docker 部署
-- 可选 API Key 鉴权和受限 CORS
-
-## 多轮上下文
-
-三个概念在系统里是分开的，不能混用：
+## 多轮对话示例
 
 ```text
-用户原始 Query  ≠  检索 Query
-Conversation History  ≠  Active Intent Context
-Context Resolution  ≠  Retrieval
+用户：A组这周怎么排班？
+助手：A组本周负责上午班次，并返回排班文档引用。
+
+用户：那么B组呢？
+助手：系统结合上一轮上下文，检索 B 组的排班信息。
+
+用户：这个需要提前申请吗？
+助手：系统识别为当前业务主题下的新追问，再检索对应制度。
 ```
 
-- **Context Router** 按规则把请求分成四类。`direct` 是寒暄，直接返回固定话术，不碰 Embedding、Chroma、Reranker 和 LLM；`independent` 是自足的单轮问题，不经过上下文层；`continue` 命中指代、省略或序数引用（如“那么B组呢？”“第二条是谁负责？”），需要恢复上下文；`new_intent` 是新的业务意图，清空 `active_context` 但保留 `chat_messages`。
-- **Context Resolver** 用 LLM 把省略和指代还原成完整的检索问题，输出 `intent` / `slots` / `retrieval_query`。`slots` 不绑定排班领域，`schedule_query` 的 `group`、`finance_policy` 的 `policy_type` 走的是同一套结构。
-- **Query Assembly** 直接采用 Resolver 给出的可靠改写，不会为了形式再调一次 LLM。
-- **双路召回** 同时用原始 Query 和改写 Query 检索，按 chunk 唯一 ID `document_id:chunk_index` 合并去重。同一个 chunk 被两路命中时 `raw_score` 和 `rewrite_score` 都保留，重排序基础分取两者较高值，不做覆盖。
-- **生成阶段始终使用用户原始 Query**，改写结果只用于检索。
+系统会保留完整聊天记录，并将当前会话的 `active_context` 持久化。Context Resolver 只使用最近若干轮对话；没有配置 `LLM_API_KEY` 时，多轮改写回落到原始问题。
 
-`active_context` 按会话持久化在 `chat_sessions.active_context`，重启不丢；`chat_messages` 始终保存完整聊天记录。Resolver 只喂最近 `CONTEXT_HISTORY_TURNS` 轮，不会把全部历史塞进 Prompt。
+## RAG 流程
 
-任何解析失败 —— 没有配置 LLM、调用超时、返回非法 JSON —— 都会回落到原始 Query 走单路召回，不会让接口 500。系统既允许「改写成功 → 双路召回」，也允许「改写失败 → 原始 Query 继续工作」。
+1. 文档解析：PDF、DOCX、TXT、Markdown
+2. 文本切分：默认 `chunk_size=800`、`chunk_overlap=150`
+3. Embedding：默认 Hash Embedding，也支持 BGE
+4. Chroma 向量检索
+5. 相关性阈值验证
+6. Lexical 或 Cross Encoder Reranking
+7. LLM 生成，未配置 LLM 时使用抽取式回答
+8. 返回答案、引用和 Agent Trace
+
+默认 Hash Embedding 不需要下载模型，适合本地演示；BGE 和 Cross Encoder 首次使用时会从 Hugging Face 下载模型。
+
+## Agent 能力
+
+| 能力 | 当前实现 |
+| --- | --- |
+| Context Router | 规则判断寒暄、独立问题、追问和新意图 |
+| Context Resolver | 可选 LLM，将多轮问题恢复为检索 Query |
+| Memory | 按用户隔离的长期信息；短期状态由会话保存 |
+| Tool Router | 确定性路由到年假、报销、会议室演示工具 |
+| RBAC | `X-Role` 演示身份，按文档元数据过滤结果 |
+| MCP | 独立可选 stdio Server；当前未实现 Agent 侧远程 MCP Client |
 
 ## 技术栈
 
 - Python 3.11+
-- FastAPI
-- LangGraph / LangChain
+- FastAPI、Uvicorn
+- LangGraph、LangChain
 - ChromaDB
-- SQLAlchemy Async
-- SQLite / MySQL
-- Docker Compose
+- SQLAlchemy Async、SQLite / MySQL
+- Sentence Transformers（可选 BGE / Cross Encoder）
+- Docker Compose、GitHub Actions
 
 ## 项目结构
 
 ```text
 app/
-├── api/                 文档、会话、问答和检索接口
-├── core/
-│   ├── agent.py         LangGraph 工作流与双路召回合并
-│   ├── context_router.py    请求分流
-│   ├── context_resolver.py  多轮上下文解析
-│   ├── document_parser.py
-│   ├── embedding.py
-│   ├── generator.py
-│   ├── reranker.py
-│   ├── retriever.py
-│   └── vector_store.py
+├── api/                 文档、问答、会话、检索、Memory 和工具接口
+├── core/                Agent、上下文、检索、Embedding、Reranking 和生成
+├── services/            文档、会话和 Memory 服务
 ├── models/              SQLAlchemy 数据模型
 ├── schemas/             请求和响应模型
-├── services/            文档处理和会话服务
-├── config.py
-├── dependencies.py
-└── main.py
+├── mcp_server.py        可选的独立 MCP stdio Server
+└── main.py              FastAPI 应用入口
+evaluation/              离线检索评测和评测数据
+tests/                   单元、API、E2E 和能力测试
+docs/                    架构与评测边界说明
 ```
 
-## 本地运行
+## 快速运行
 
-```bash
-python -m venv .venv
-```
+要求：Python 3.11+。
 
-Windows：
+Windows PowerShell：
 
 ```powershell
+python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
@@ -109,139 +142,113 @@ uvicorn app.main:app --reload
 
 启动后访问：
 
-- Swagger：http://127.0.0.1:8000/docs
-- 健康检查：http://127.0.0.1:8000/health
-- 就绪检查：http://127.0.0.1:8000/ready
+- Swagger：<http://127.0.0.1:8000/docs>
+- 健康检查：<http://127.0.0.1:8000/health>
+- 就绪检查：<http://127.0.0.1:8000/ready>
 
-默认配置使用 SQLite、本地 Chroma 和 Hash Embedding，不需要下载模型，也不需要 API Key，可以完整演示上传、检索、重排序、引用和 Agent Trace。
+默认配置使用 SQLite、本地 Chroma、Hash Embedding 和 Lexical Reranker，不需要 API Key 即可演示文档上传、检索、引用和抽取式回答。
 
-## 使用 BGE 和大模型
+## 配置
 
-需要更好的语义检索时修改 `.env`：
+通常只需要关注以下配置：
 
 ```env
-EMBEDDING_BACKEND=bge
-EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
-
-RERANK_BACKEND=cross_encoder
-RERANK_MODEL=BAAI/bge-reranker-v2-m3
-
-LLM_API_KEY=your-key
+EMBEDDING_BACKEND=hash       # hash 或 bge
+RERANK_BACKEND=lexical       # lexical 或 cross_encoder
+LLM_API_KEY=
 LLM_BASE_URL=https://api.deepseek.com
 LLM_MODEL=deepseek-chat
+APP_API_KEY=
 ```
 
-BGE 和 Cross Encoder 首次运行时会从 Hugging Face 下载模型。模型实例会在进程内缓存，Embedding、重排序、文档解析和 Chroma 操作都通过线程池执行，不阻塞 FastAPI 事件循环。
-
-如果没有配置 `LLM_API_KEY`，系统会根据命中的文档片段生成抽取式回答，并继续返回引用来源。
+配置 `LLM_API_KEY` 后，系统可使用兼容 OpenAI API 的模型生成答案和进行多轮 Query Rewrite。配置 `APP_API_KEY` 后，业务接口需要携带 `X-API-Key`。不要把 API Key 或数据库密码提交到 Git。
 
 ## API
 
-### 文档
+完整接口可通过 Swagger 查看：<http://127.0.0.1:8000/docs>。
 
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| POST | `/api/documents/upload` | 上传并后台处理文档 |
-| GET | `/api/documents` | 查询文档列表和处理状态 |
-| GET | `/api/documents/{id}` | 查询单个文档 |
-| DELETE | `/api/documents/{id}` | 删除文档、文件和向量 |
+- `POST /api/documents/upload`：上传文档并后台处理；支持查询处理状态、列表和删除。
+- `POST /api/retrieval/search`：直接查看向量召回结果。
+- `POST /api/chat`：普通问答，返回答案、引用、Trace 和会话信息。
+- `POST /api/chat/stream`：SSE Token 流式问答。
+- `POST /api/sessions`、`GET /api/sessions`、`DELETE /api/sessions/{id}`：管理会话。
+- `POST /api/messages/{id}/feedback`：记录回答点赞或点踩。
+- `POST`、`GET`、`DELETE /api/memory`：管理按用户隔离的 Memory。
+- `GET /api/tools`、`POST /api/tools/execute`：查看并执行演示业务工具。
 
-上传接口返回 `202`。状态会从 `processing` 变成 `ready` 或 `error`，失败原因位于 `error_message`。
+## 测试与评测
 
-### 检索与问答
+运行测试：
 
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| POST | `/api/retrieval/search` | 只执行向量检索，便于调试召回结果 |
-| POST | `/api/chat` | LangGraph 完整问答 |
-| POST | `/api/chat/stream` | SSE 流式问答 |
-| POST | `/api/messages/{id}/feedback` | 点赞或点踩回答 |
-
-普通问答示例：
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{"query":"员工报销需要在多少天内提交？"}'
-```
-
-响应中的 `citations` 包含文档 ID、文档名、片段序号、内容预览和重排序分数；`trace` 展示本次请求经过的 LangGraph 节点。
-
-### 会话
-
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| POST | `/api/sessions` | 创建会话 |
-| GET | `/api/sessions` | 查询会话列表 |
-| DELETE | `/api/sessions/{id}` | 删除会话及消息 |
-
-## API 保护
-
-部署环境可以配置：
-
-```env
-APP_API_KEY=replace-with-a-long-random-value
-CORS_ORIGINS=https://your-frontend.example
-```
-
-配置后，业务接口必须携带：
-
-```text
-X-API-Key: replace-with-a-long-random-value
-```
-
-## Docker + MySQL
-
-```bash
-Copy-Item .env.example .env
-docker compose up --build
-```
-
-Compose 会启动 MySQL 8.4 和 API，并等待 MySQL 健康后再启动应用。上传文件、Chroma 数据、MySQL 数据和 Hugging Face 模型缓存都使用独立 volume。
-
-示例密码只用于本地演示，部署前应修改：
-
-```env
-MYSQL_PASSWORD=your-password
-MYSQL_ROOT_PASSWORD=your-root-password
-```
-
-## 测试
-
-```bash
+```powershell
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
-python -m ruff check .
 ```
 
-测试使用 Fake Retriever、Fake Generator 和 Scripted Resolver，不下载模型、不访问外部 LLM，覆盖：
+当前本地验证结果：**31 passed**。测试覆盖 Agent 分支、RAG 引用、多轮上下文、Memory、Tool Router、权限过滤、API、SSE、文档处理和 E2E。
 
-- LangGraph 正常分支
-- 无可靠资料分支
-- 问答、引用和反馈
-- SSE 流式事件
-- 文档后台处理
-- 不支持文件类型校验
-- Direct Response 不触碰检索与生成
-- 多轮改写、跨轮引用和新意图切断
-- 双路召回合并去重与重排序基础分取值
-- 解析失败回落到原始 Query
-- `active_context` 按会话持久化
+运行离线检索评测：
 
-## Evaluation
-
-```bash
+```powershell
 python evaluation/run_retrieval_eval.py
 ```
 
-脚本在本地构建索引并跑 q01~q23，输出单轮 Hit@K、多轮 Raw / Rewrite / Merged Hit@K、Rewrite Success Rate、Fallback Rate 和验证通过率。多轮用例会调真实 Agent 图校验路由与回落行为，改写结果由 `dataset.json` 标注提供，评测的是检索链路如何处理改写，不是解析器本身的质量。
+当前 Hash Embedding + Lexical Reranker 的评测摘要：
 
-评测默认使用 hash embedding 和 lexical reranker，分数只反映离线检索链路的行为，**不代表生产语义模型性能**。已知问题：0.05 的 `MIN_RELEVANCE_SCORE` 对 hash embedding 无法有效识别不可回答的问题，`Correct abstention` 为 0，这属于下一阶段的验证策略优化，不在多轮改造范围内。
+| 指标 | 结果 |
+| --- | --- |
+| 单轮 Vector Hit@1 | 8/9（88.89%）|
+| 单轮 Vector Hit@3 | 9/9（100%）|
+| 单轮 Rerank Hit@1 | 8/9（88.89%）|
+| 单轮 Rerank Hit@3 | 9/9（100%）|
+| 多轮 Raw Query Hit@3 | 7/10（70%）|
+| 多轮 Rewrite Query Hit@3 | 9/9（100%）|
+| 多轮 Merged Hit@3 | 10/10（100%）|
 
-## 设计边界
+这些指标衡量的是固定数据集上的文档召回，不代表答案正确性、引用正确性或 Faithfulness。评测使用独立的 `200/30` 多 Chunk 实验配置，不等同于默认运行配置 `800/150`。
 
-- 当前 Chroma 使用单集合存储，生产环境的多租户场景应增加租户字段和权限过滤。
-- FastAPI `BackgroundTasks` 适合单机项目；大规模文档处理应替换为消息队列和独立 Worker。
-- Hash Embedding 用于零下载演示；需要语义效果时使用 BGE。
-- Context Resolver 依赖 LLM。没有配置 `LLM_API_KEY` 时多轮改写不会生效，追问会回落到原始 Query 走单路召回，链路本身仍然可用。
-- Context Router 使用规则分流而非模型分类，指代和省略的判定覆盖常见句式，更复杂的表达需要依赖 Resolver。
+## Docker / CI
+
+Docker Compose 提供 API + MySQL 8.4 配置，并为上传文件、Chroma、MySQL 和模型缓存挂载 volume：
+
+```powershell
+Copy-Item .env.example .env
+
+```
+
+Compose 配置已提供，但本次 README 重构未进行 Docker runtime 验证，不将其描述为已验证的生产部署方案。
+
+GitHub Actions 当前配置执行：
+
+- `ruff check .`
+- `python -m compileall -q app evaluation tests`
+- `pytest -q`
+
+## 当前限制
+
+- Hash Embedding 适合零下载演示；需要更强语义检索时应使用 BGE，并单独评测模型效果。
+- 没有 `LLM_API_KEY` 时，Context Resolver 不做真正的多轮改写，只回落到原始 Query；答案使用抽取式生成。
+- Context Router 是规则实现，复杂指代和省略仍需要进一步覆盖。
+- 当前 `X-Role` 是请求头注入的演示身份，不是 JWT、OAuth、SSO 或完整 IAM。
+- Chroma 当前使用单集合，未实现生产级多租户隔离。
+- 文档处理使用 FastAPI `BackgroundTasks`，不适合大规模消息队列和分布式 Worker 场景。
+- 当前 MCP 仅提供独立 stdio Server，没有 Agent 侧远程 MCP Client，也没有完整 Agent-MCP 调用链。
+- Hash 评测中 3 个不可回答样本均未被正确拒答（`Correct abstention=0/3`）；生成质量、Faithfulness、权限和工具的自动化评测仍不完整。
+- 本次检查中 Ruff 仍有现有测试文件的 5 个 E501 行长度问题；不影响 `pytest` 的 31 个测试通过，但 CI 的 Ruff 步骤需要单独处理。
+
+## 项目来源与二次开发
+
+本项目基于 GitHub 开源项目 [XIAOYE616/enterprise-rag-agent](https://github.com/XIAOYE616/enterprise-rag-agent) 进行企业内部知识库场景的重构与二次开发。
+
+在原有 RAG Agent 基础上，围绕企业多轮知识问答场景进行了功能扩展和工程化改造，包括：
+
+- 多轮上下文处理与 Query Rewrite
+- 原始 Query / 改写 Query 双路检索与去重
+- Reranking、Memory、Tool Router 和 RBAC 演示
+- Evaluation、E2E Testing、请求日志和 CI
+- Docker Compose 与独立 MCP stdio Server
+
+仓库中未发现明确的 LICENSE 文件或许可证声明，因此不对原项目补充或推断 MIT、Apache、BSD 等许可证。
+
+更多设计与评测边界见 [docs/architecture.md](docs/architecture.md) 和 [docs/evaluation.md](docs/evaluation.md)。
+- `app/mcp_server.py` 是独立的可选 MCP stdio server，提供会议室和公司通知工具；当前没有 Agent 侧远程 MCP Client，不声称完整 Agent-MCP 集成。

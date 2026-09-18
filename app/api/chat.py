@@ -2,7 +2,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.dependencies import get_chat_service, verify_api_key
@@ -30,15 +30,23 @@ async def delete_session(session_id: str, service: ChatServiceDep):
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat(body: ChatRequest, service: ChatServiceDep):
+async def chat(
+    body: ChatRequest,
+    service: ChatServiceDep,
+    x_role: str = Header(default="employee"),
+):
     try:
-        return await service.answer(body.session_id, body.query)
+        return await service.answer(body.session_id, body.query, body.user_id, x_role)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/chat/stream")
-async def chat_stream(body: ChatRequest, service: ChatServiceDep) -> StreamingResponse:
+async def chat_stream(
+    body: ChatRequest,
+    service: ChatServiceDep,
+    x_role: str = Header(default="employee"),
+) -> StreamingResponse:
     try:
         chat_session, history, active_context = await service.begin_exchange(
             body.session_id, body.query
@@ -46,7 +54,10 @@ async def chat_stream(body: ChatRequest, service: ChatServiceDep) -> StreamingRe
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    prepared = await service.agent.prepare_stream(body.query, history, active_context)
+    await service._capture_memory(body.user_id, body.query)
+    prepared = await service.agent.prepare_stream(
+        body.query, history, active_context, body.user_id, x_role
+    )
     await service.save_active_context(chat_session.id, prepared.get("active_context"))
 
     async def event_stream() -> AsyncIterator[str]:
@@ -57,8 +68,20 @@ async def chat_stream(body: ChatRequest, service: ChatServiceDep) -> StreamingRe
                 chunks.append(prepared["direct_answer"])
                 yield _sse("token", {"text": prepared["direct_answer"]})
             else:
+                stream_history = list(history)
+                if prepared.get("memory_context"):
+                    memory_text = "；".join(
+                        f"{item['key']}={item['value']}"
+                        for item in prepared["memory_context"]
+                    )
+                    stream_history.append(
+                        {
+                            "role": "system",
+                            "content": f"相关用户记忆（非知识库事实）：{memory_text}",
+                        }
+                    )
                 async for token in service.agent.generator.stream(
-                    body.query, prepared["documents"], history
+                    body.query, prepared["documents"], stream_history
                 ):
                     chunks.append(token)
                     yield _sse("token", {"text": token})

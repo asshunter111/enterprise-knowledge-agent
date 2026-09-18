@@ -9,14 +9,13 @@ PROJECT_ROOT = BASE_DIR.parent
 
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.config import Settings
-from app.core.agent import EnterpriseRAGAgent, merge_candidates
-from app.core.document_parser import chunk_text, parse_document
-from app.core.embedding import EmbeddingService
-from app.core.reranker import Reranker
-from app.core.retriever import Retriever
-from app.core.vector_store import VectorStore
-
+from app.config import Settings  # noqa: E402
+from app.core.agent import EnterpriseRAGAgent, merge_candidates  # noqa: E402
+from app.core.document_parser import chunk_text, parse_document  # noqa: E402
+from app.core.embedding import EmbeddingService  # noqa: E402
+from app.core.reranker import Reranker  # noqa: E402
+from app.core.retriever import Retriever  # noqa: E402
+from app.core.vector_store import VectorStore  # noqa: E402
 
 DATASET_PATH = BASE_DIR / "dataset.json"
 DOCUMENT_DIR = BASE_DIR / "documents"
@@ -134,12 +133,13 @@ def print_results(results: list[dict], limit: int = TOP_K) -> None:
 async def build_index(
     vector_store: VectorStore,
     embedding_service: EmbeddingService,
+    settings: Settings,
 ) -> None:
     """使用项目实际的文档解析和Chunk切分逻辑构建评测索引。"""
 
     for document_path in DOCUMENT_DIR.glob("*.md"):
         text = parse_document(document_path)
-        chunks = chunk_text(text)
+        chunks = chunk_text(text, settings)
 
         embeddings = await embedding_service.embed_documents(
             [chunk["content"] for chunk in chunks]
@@ -194,7 +194,7 @@ async def evaluate_single_turn(retriever: Retriever, item: dict, stats: Stats) -
         )
         print(
             "Result : "
-            f"{'✓ Correct abstention' if is_correctly_rejected else '✗ False positive'}"
+            f"{'PASS Correct abstention' if is_correctly_rejected else 'FAIL False positive'}"
         )
         return
 
@@ -223,10 +223,10 @@ async def evaluate_single_turn(retriever: Retriever, item: dict, stats: Stats) -
     else:
         print("Rerank : skipped")
     print(
-        f"Result : Vector@1={'✓' if vector_hit1 else '✗'}, "
-        f"Vector@3={'✓' if vector_hit3 else '✗'}, "
-        f"Rerank@1={'✓' if rerank_hit1 else '✗'}, "
-        f"Rerank@3={'✓' if rerank_hit3 else '✗'}"
+        f"Result : Vector@1={'PASS' if vector_hit1 else 'FAIL'}, "
+        f"Vector@3={'PASS' if vector_hit3 else 'FAIL'}, "
+        f"Rerank@1={'PASS' if rerank_hit1 else 'FAIL'}, "
+        f"Rerank@3={'PASS' if rerank_hit3 else 'FAIL'}"
     )
 
 
@@ -331,12 +331,12 @@ async def evaluate_multi_turn(
             stats.dedup_effective += 1
 
     print()
-    print(f"Raw Query Hit@{TOP_K}     : {'✓' if raw_hit else '✗'}")
+    print(f"Raw Query Hit@{TOP_K}     : {'PASS' if raw_hit else 'FAIL'}")
     if rewrite_hit is None:
         print(f"Rewrite Query Hit@{TOP_K} : - (无改写)")
     else:
-        print(f"Rewrite Query Hit@{TOP_K} : {'✓' if rewrite_hit else '✗'}")
-    print(f"Merged Hit@{TOP_K}        : {'✓' if merged_hit else '✗'}")
+        print(f"Rewrite Query Hit@{TOP_K} : {'PASS' if rewrite_hit else 'FAIL'}")
+    print(f"Merged Hit@{TOP_K}        : {'PASS' if merged_hit else 'FAIL'}")
 
     if mode == "dedup":
         unique = len(merged_results)
@@ -422,6 +422,8 @@ async def evaluate(settings: Settings, retriever: Retriever) -> Stats:
     print("=" * 90)
     print("Embedding backend : hash (离线演示用，不代表生产语义检索效果)")
     print("Rerank backend    : lexical")
+    print("Production chunks : 800/150")
+    print("Experiment chunks : 200/30")
 
     for item in dataset:
         mode = item.get("mode")
@@ -479,6 +481,24 @@ def print_summary(stats: Stats) -> None:
     print(f"Questions with verified candidates : {stats.verify_pass}")
     print(f"Questions rejected by Verify       : {stats.verify_reject}")
     print(metric("Correct abstention", stats.correct_abstention, stats.unanswerable))
+    print(
+        metric(
+            "Abstention recall",
+            stats.correct_abstention,
+            stats.unanswerable,
+        )
+    )
+    predicted_abstentions = stats.verify_reject
+    if predicted_abstentions:
+        print(
+            metric(
+                "Abstention precision",
+                stats.correct_abstention,
+                predicted_abstentions,
+            )
+        )
+    else:
+        print("Abstention precision  : n/a (no questions were rejected)")
 
     print()
     print("Agent Behaviour:")
@@ -490,7 +510,7 @@ def print_summary(stats: Stats) -> None:
         print()
         print("Failed Cases:")
         for failure in stats.failures:
-            print(f"  ✗ {failure}")
+            print(f"  FAIL {failure}")
     else:
         print()
         print("Failed Cases: none")
@@ -502,7 +522,8 @@ def print_summary(stats: Stats) -> None:
 
 async def main() -> None:
     settings = Settings(
-        chroma_collection="rag_evaluation_v2",
+        chroma_collection="evaluation_hash_experiment_chunk200",
+        chroma_persist_dir=BASE_DIR / ".chroma",
         embedding_backend="hash",
         rerank_backend="lexical",
         chunk_size=200,
@@ -523,6 +544,7 @@ async def main() -> None:
     await build_index(
         vector_store=vector_store,
         embedding_service=embedding_service,
+        settings=settings,
     )
 
     stats = await evaluate(settings, retriever)

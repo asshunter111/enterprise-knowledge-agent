@@ -4,7 +4,7 @@ import pymupdf
 from docx import Document as DocxDocument
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
 
@@ -20,8 +20,11 @@ def parse_document(path: Path) -> str:
     raise ValueError(f"unsupported file type: {suffix}")
 
 
-def chunk_text(text: str) -> list[dict]:
-    settings = get_settings()
+def chunk_text(
+    text: str,
+    settings: Settings | None = None,
+) -> list[dict]:
+    settings = settings or get_settings()
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,

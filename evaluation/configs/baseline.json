@@ -1,0 +1,10 @@
+{
+  "name": "baseline-hash-lexical",
+  "embedding_backend": "hash",
+  "embedding_model": "deterministic-sha256",
+  "rerank_backend": "lexical",
+  "chunk_size": 800,
+  "chunk_overlap": 150,
+  "top_k": 3,
+  "dataset": "dataset.json"
+}

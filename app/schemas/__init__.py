@@ -42,6 +42,7 @@ class Citation(BaseModel):
 
 class ChatRequest(BaseModel):
     session_id: str | None = None
+    user_id: str = Field(default="anonymous", min_length=1, max_length=100)
     query: str = Field(min_length=1, max_length=2000)
 
 
@@ -52,6 +53,9 @@ class ChatResponse(BaseModel):
     citations: list[Citation] = Field(default_factory=list)
     trace: list[str] = Field(default_factory=list)
     retrieved_count: int = 0
+    tool: str | None = None
+    memory_used: bool = False
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
 class FeedbackRequest(BaseModel):
@@ -67,3 +71,22 @@ class RetrievalResult(BaseModel):
     content: str
     score: float
     metadata: dict[str, Any]
+
+
+class MemoryWrite(BaseModel):
+    user_id: str = Field(min_length=1, max_length=100)
+    key: str = Field(min_length=1, max_length=100)
+    value: str = Field(min_length=1, max_length=2000)
+    memory_type: str = Field(default="preference", min_length=1, max_length=50)
+
+
+class MemoryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    user_id: str
+    key: str
+    value: str
+    memory_type: str
+    created_at: datetime
+    updated_at: datetime

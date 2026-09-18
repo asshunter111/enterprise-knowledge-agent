@@ -1,5 +1,6 @@
 import logging
 import operator
+import re
 from functools import lru_cache
 from typing import Annotated, TypedDict
 
@@ -17,7 +18,9 @@ from app.core.context_router import (
     direct_reply,
 )
 from app.core.generator import AnswerGenerator, get_answer_generator
+from app.core.permissions import filter_documents
 from app.core.retriever import Retriever, get_retriever
+from app.core.tools import BusinessToolRegistry, ToolExecutionError, build_default_tool_registry
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +45,13 @@ class AgentState(TypedDict, total=False):
 
     answer: str
     citations: list[dict]
+    user_id: str
+    role: str
+    tool_name: str | None
+    tool_arguments: dict
+    tool_result: dict | None
+    memory_context: list[dict]
+    diagnostics: dict
     trace: Annotated[list[str], operator.add]
 
 
@@ -82,18 +92,25 @@ class EnterpriseRAGAgent:
         generator: AnswerGenerator,
         resolver: ContextResolver | None = None,
         router: ContextRouter | None = None,
+        tool_registry: BusinessToolRegistry | None = None,
+        memory_service=None,
     ) -> None:
         self.settings = settings
         self.retriever = retriever
         self.generator = generator
         self.resolver = resolver if resolver is not None else ContextResolver(settings)
         self.router = router if router is not None else ContextRouter()
+        self.tool_registry = tool_registry or build_default_tool_registry()
+        self.memory_service = memory_service
         self.graph = self._build_graph(with_generate=True)
         self.context_graph = self._build_graph(with_generate=False)
 
     def _build_graph(self, with_generate: bool):
         graph = StateGraph(AgentState)
         graph.add_node("context_router", self._context_router)
+        graph.add_node("memory_context", self._memory_context)
+        graph.add_node("tool_execute", self._tool_execute)
+        graph.add_node("tool_response", self._tool_response)
         graph.add_node("direct_response", self._direct_response)
         graph.add_node("retrieve", self._retrieve)
         graph.add_node("context_resolve", self._context_resolve)
@@ -105,17 +122,21 @@ class EnterpriseRAGAgent:
         graph.add_node("rerank", self._rerank)
         graph.add_node("no_context", self._no_context)
 
-        graph.add_edge(START, "context_router")
+        graph.add_edge(START, "memory_context")
+        graph.add_edge("memory_context", "context_router")
         graph.add_conditional_edges(
             "context_router",
             self._route_after_router,
             {
                 "direct": "direct_response",
+                "tool": "tool_execute",
                 "independent": "retrieve",
                 "contextual": "context_resolve",
             },
         )
         graph.add_edge("direct_response", END)
+        graph.add_edge("tool_execute", "tool_response")
+        graph.add_edge("tool_response", END)
         graph.add_edge("retrieve", "verify")
         graph.add_edge("context_resolve", "query_assembly")
         graph.add_edge("query_assembly", "raw_retrieve")
@@ -146,8 +167,12 @@ class EnterpriseRAGAgent:
         query: str,
         history: list[dict] | None = None,
         active_context: dict | None = None,
+        user_id: str = "anonymous",
+        role: str = "employee",
     ) -> dict:
-        state = await self.graph.ainvoke(self._initial_state(query, history, active_context))
+        state = await self.graph.ainvoke(
+            self._initial_state(query, history, active_context, user_id, role)
+        )
         return {
             "answer": state.get("answer") or FALLBACK_ANSWER,
             "citations": state.get("citations", []),
@@ -156,6 +181,9 @@ class EnterpriseRAGAgent:
             "active_context": state.get("active_context"),
             "retrieval_query": state.get("retrieval_query") or query,
             "context_mode": state.get("context_mode", ""),
+            "tool": state.get("tool_name"),
+            "memory_used": bool(state.get("memory_context")),
+            "diagnostics": state.get("diagnostics", {}),
         }
 
     async def prepare_stream(
@@ -163,22 +191,37 @@ class EnterpriseRAGAgent:
         query: str,
         history: list[dict] | None = None,
         active_context: dict | None = None,
+        user_id: str = "anonymous",
+        role: str = "employee",
     ) -> dict:
         state = await self.context_graph.ainvoke(
-            self._initial_state(query, history, active_context)
+            self._initial_state(query, history, active_context, user_id, role)
         )
         documents = state.get("documents", [])
-        direct_answer = state.get("answer") if state.get("context_mode") == DIRECT else None
+        direct_answer = (
+            state.get("answer")
+            if state.get("context_mode") in {DIRECT, "tool"}
+            else None
+        )
         return {
             "documents": documents,
             "citations": self.generator.build_citations(documents),
             "trace": state.get("trace", []),
             "direct_answer": direct_answer or None,
             "active_context": state.get("active_context"),
+            "memory_context": state.get("memory_context", []),
         }
 
     async def _context_router(self, state: AgentState) -> dict:
         query = state["query"]
+        tool_intent = self._detect_tool_intent(query, state.get("user_id", "anonymous"))
+        if tool_intent is not None:
+            return {
+                "context_mode": "tool",
+                "tool_name": tool_intent[0],
+                "tool_arguments": tool_intent[1],
+                "trace": [f"context_router: tool ({tool_intent[0]})"],
+            }
         mode = self.router.route(query, state.get("history", []), state.get("active_context"))
 
         if mode == DIRECT:
@@ -208,6 +251,62 @@ class EnterpriseRAGAgent:
             "citations": [],
             "trace": ["direct_response: completed"],
         }
+
+    async def _memory_context(self, state: AgentState) -> dict:
+        if self.memory_service is None or not state.get("user_id"):
+            return {"memory_context": []}
+        try:
+            memories = await self.memory_service.retrieve(
+                state["user_id"], state["query"]
+            )
+        except Exception as exc:
+            logger.warning("memory retrieval failed: %s", exc)
+            return {"memory_context": []}
+        return {
+            "memory_context": [
+                {"key": item.key, "value": item.value, "memory_type": item.memory_type}
+                for item in memories
+            ]
+        }
+
+    async def _tool_execute(self, state: AgentState) -> dict:
+        name = state.get("tool_name") or ""
+        if name == "get_reimbursement_status" and state.get("role") not in {
+            "finance",
+            "admin",
+            "manager",
+        }:
+            return {
+                "tool_result": None,
+                "answer": "当前角色无权查询报销单状态。",
+                "trace": [f"tool: denied {name}"],
+            }
+        try:
+            result = await self.tool_registry.execute(
+                name, **(state.get("tool_arguments") or {})
+            )
+            return {"tool_result": result, "trace": [f"tool: executed {name}"]}
+        except ToolExecutionError as exc:
+            logger.warning("tool execution failed: %s", exc)
+            return {
+                "tool_result": None,
+                "answer": "当前无法完成该业务查询。",
+                "trace": [f"tool: failed {name}"],
+            }
+
+    async def _tool_response(self, state: AgentState) -> dict:
+        result = state.get("tool_result")
+        if not result:
+            return {"answer": state.get("answer") or "当前无法完成该业务查询。"}
+        name = state.get("tool_name")
+        if name == "get_leave_balance":
+            answer = f"员工 {result['employee_id']} 还剩 {result['annual_leave_days']} 天年假。"
+        elif name == "get_reimbursement_status":
+            answer = f"报销单 {result['reimbursement_id']} 当前状态是：{result['status']}。"
+        else:
+            rooms = "、".join(result.get("rooms", [])) or "暂无空闲会议室"
+            answer = f"{result.get('date')} {result.get('time')} 可用会议室：{rooms}。"
+        return {"answer": answer, "citations": [], "trace": ["tool: response completed"]}
 
     async def _retrieve(self, state: AgentState) -> dict:
         candidates = await self.retriever.retrieve(state["query"])
@@ -287,13 +386,23 @@ class EnterpriseRAGAgent:
         }
 
     async def _verify(self, state: AgentState) -> dict:
+        permitted = filter_documents(state.get("candidates", []), state.get("role", "employee"))
+        scores = [float(item.get("score", 0.0)) for item in permitted]
         candidates = [
             item
-            for item in state.get("candidates", [])
+            for item in permitted
             if item.get("score", 0.0) >= self.settings.min_relevance_score
         ]
         return {
             "candidates": candidates,
+            "diagnostics": {
+                "query": state["query"],
+                "raw_candidate_count": len(state.get("candidates", [])),
+                "permission_allowed_count": len(permitted),
+                "raw_scores": scores,
+                "verified_count": len(candidates),
+                "threshold": self.settings.min_relevance_score,
+            },
             "trace": [f"verify: {len(candidates)} candidates passed threshold"],
         }
 
@@ -308,8 +417,16 @@ class EnterpriseRAGAgent:
         }
 
     async def _generate(self, state: AgentState) -> dict:
+        history = list(state.get("history", []))
+        if state.get("memory_context"):
+            memory_text = "；".join(
+                f"{item['key']}={item['value']}" for item in state["memory_context"]
+            )
+            history.append(
+                {"role": "system", "content": f"相关用户记忆（非知识库事实）：{memory_text}"}
+            )
         result = await self.generator.generate(
-            state["query"], state.get("documents", []), state.get("history", [])
+            state["query"], state.get("documents", []), history
         )
         return {
             "answer": result["answer"],
@@ -342,6 +459,8 @@ class EnterpriseRAGAgent:
         mode = state.get("context_mode")
         if mode == DIRECT:
             return "direct"
+        if mode == "tool":
+            return "tool"
         if mode == INDEPENDENT:
             return "independent"
         return "contextual"
@@ -359,6 +478,8 @@ class EnterpriseRAGAgent:
         query: str,
         history: list[dict] | None,
         active_context: dict | None = None,
+        user_id: str = "anonymous",
+        role: str = "employee",
     ) -> AgentState:
         return {
             "query": query,
@@ -375,7 +496,27 @@ class EnterpriseRAGAgent:
             "answer": "",
             "citations": [],
             "trace": [],
+            "user_id": user_id,
+            "role": role,
+            "tool_name": None,
+            "tool_arguments": {},
+            "tool_result": None,
+            "memory_context": [],
+            "diagnostics": {},
         }
+
+    @staticmethod
+    def _detect_tool_intent(query: str, user_id: str) -> tuple[str, dict] | None:
+        if any(token in query for token in ("年假", "年休假", "假期余额")):
+            return "get_leave_balance", {"employee_id": user_id}
+        reimbursement = re.search(r"(?:报销单|申请)[\s#号：:]*([A-Za-z0-9-]+)", query)
+        if "报销" in query and ("状态" in query or "到哪" in query or reimbursement):
+            return "get_reimbursement_status", {
+                "reimbursement_id": reimbursement.group(1) if reimbursement else "latest"
+            }
+        if "会议室" in query and any(token in query for token in ("有没有", "可用", "空闲")):
+            return "query_meeting_rooms", {"date": "明天", "time": "下午"}
+        return None
 
 
 @lru_cache

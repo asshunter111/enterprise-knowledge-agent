@@ -1,0 +1,26 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: sqlite+aiosqlite:///./.ci-data/test.db
+      UPLOAD_DIR: ./.ci-data/uploads
+      CHROMA_PERSIST_DIR: ./.ci-data/chroma
+      CHROMA_COLLECTION: ci_collection
+      EMBEDDING_BACKEND: hash
+      RERANK_BACKEND: lexical
+      LLM_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: python -m compileall -q app evaluation tests
+      - run: pytest -q
