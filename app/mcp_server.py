@@ -4,7 +4,7 @@ The optional dependency is kept out of the normal pytest path. Install ``mcp``
 and run this module to expose the administrative tools over stdio.
 """
 
-from app.core.tools import query_meeting_rooms
+from app.core.tools import query_meeting_rooms as _query_meeting_rooms
 
 
 def create_server():
@@ -16,8 +16,8 @@ def create_server():
     server = FastMCP("enterprise-admin")
 
     @server.tool()
-    async def query_meeting_room(date: str, time: str) -> dict:
-        return await query_meeting_rooms(date, time)
+    async def query_meeting_rooms(date: str, time: str) -> dict:
+        return await _query_meeting_rooms(date, time)
 
     @server.tool()
     async def query_company_notice(topic: str) -> dict:

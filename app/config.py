@@ -1,3 +1,4 @@
+import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
@@ -28,6 +29,7 @@ class Settings(BaseSettings):
     retrieval_top_k: int = 10
     rerank_top_k: int = 5
     min_relevance_score: float = 0.05
+    evidence_min_rerank_score: float = 0.20
     memory_retrieval_limit: int = 5
     evaluation_collection_prefix: str = "evaluation"
     environment: str = "development"
@@ -38,6 +40,10 @@ class Settings(BaseSettings):
     llm_api_key: str | None = None
     llm_base_url: str | None = "https://api.deepseek.com"
     llm_model: str = "deepseek-chat"
+
+    mcp_server_command: str = sys.executable
+    mcp_server_module: str = "app.mcp_server"
+    mcp_timeout_seconds: float = 10.0
 
     app_api_key: str | None = None
     cors_origins: Annotated[list[str], NoDecode] = Field(

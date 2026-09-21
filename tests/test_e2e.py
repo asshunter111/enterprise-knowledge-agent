@@ -50,7 +50,12 @@ async def test_real_hash_rag_e2e_returns_citation(tmp_path):
     )
     embedding = EmbeddingService(settings)
     store = VectorStore(settings)
-    chunks = [{"content": "兰州是甘肃省的省会城市。", "metadata": {"chunk_index": 0, "chunk_total": 1}}]
+    chunks = [
+        {
+            "content": "兰州是甘肃省的省会城市。",
+            "metadata": {"chunk_index": 0, "chunk_total": 1},
+        }
+    ]
     vectors = await embedding.embed_documents([chunks[0]["content"]])
     await store.upsert(chunks, vectors, "company", "company.md")
     retriever = Retriever(settings, embedding, store, Reranker(settings))

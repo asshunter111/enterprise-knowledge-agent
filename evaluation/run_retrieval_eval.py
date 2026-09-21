@@ -56,6 +56,17 @@ class Stats:
     behaviour_failed: int = 0
     failures: list[str] = field(default_factory=list)
 
+    baseline_answerable_correct: int = 0
+    baseline_correct_abstention: int = 0
+    baseline_false_refusal: int = 0
+    baseline_false_answer: int = 0
+    baseline_predicted_abstentions: int = 0
+    improved_answerable_correct: int = 0
+    improved_correct_abstention: int = 0
+    improved_false_refusal: int = 0
+    improved_false_answer: int = 0
+    improved_predicted_abstentions: int = 0
+
     def record(self, case_id: str, message: str, passed: bool) -> None:
         if passed:
             self.behaviour_passed += 1
@@ -196,9 +207,8 @@ async def evaluate_single_turn(retriever: Retriever, item: dict, stats: Stats) -
             "Result : "
             f"{'PASS Correct abstention' if is_correctly_rejected else 'FAIL False positive'}"
         )
-        return
-
-    stats.answerable += 1
+    else:
+        stats.answerable += 1
 
     vector_hit1 = bool(vector_documents) and vector_documents[0] == expected_document
     vector_hit3 = expected_document in vector_documents[:TOP_K]
@@ -210,24 +220,62 @@ async def evaluate_single_turn(retriever: Retriever, item: dict, stats: Stats) -
     stats.rerank_hit_at_1 += int(rerank_hit1)
     stats.rerank_hit_at_3 += int(rerank_hit3)
 
-    print(f"Expected : {expected_document}")
-    print("Vector:")
-    print_results(vector_results)
-    print(
-        f"Verify : {len(verified_results)}/{len(vector_results)} candidates passed "
-        f"(threshold={min_score:.4f})"
-    )
-    if rerank_results:
-        print("Rerank:")
-        print_results(rerank_results)
+    if expected_document is not None:
+        print(f"Expected : {expected_document}")
+        print("Vector:")
+        print_results(vector_results)
+        print(
+            f"Verify : {len(verified_results)}/{len(vector_results)} candidates passed "
+            f"(threshold={min_score:.4f})"
+        )
+        if rerank_results:
+            print("Rerank:")
+            print_results(rerank_results)
+        else:
+            print("Rerank : skipped")
+        print(
+            f"Result : Vector@1={'PASS' if vector_hit1 else 'FAIL'}, "
+            f"Vector@3={'PASS' if vector_hit3 else 'FAIL'}, "
+            f"Rerank@1={'PASS' if rerank_hit1 else 'FAIL'}, "
+            f"Rerank@3={'PASS' if rerank_hit3 else 'FAIL'}"
+        )
+
+    baseline_abstained = not verified_results
+    baseline_correct = expected_document is not None and not baseline_abstained and rerank_hit3
+    if expected_document is None:
+        stats.baseline_correct_abstention += int(baseline_abstained)
+        stats.baseline_false_answer += int(not baseline_abstained)
     else:
-        print("Rerank : skipped")
-    print(
-        f"Result : Vector@1={'PASS' if vector_hit1 else 'FAIL'}, "
-        f"Vector@3={'PASS' if vector_hit3 else 'FAIL'}, "
-        f"Rerank@1={'PASS' if rerank_hit1 else 'FAIL'}, "
-        f"Rerank@3={'PASS' if rerank_hit3 else 'FAIL'}"
+        stats.baseline_answerable_correct += int(baseline_correct)
+        stats.baseline_false_refusal += int(baseline_abstained)
+    stats.baseline_predicted_abstentions += int(baseline_abstained)
+
+    agent = EnterpriseRAGAgent(
+        settings=retriever.settings,
+        retriever=retriever,
+        generator=EvalGenerator(),
     )
+    improved = await agent.run(question)
+    improved_abstained = improved["abstained"]
+    if expected_document is None:
+        print(
+            "Improved evidence : "
+            f"{'abstain' if improved_abstained else 'answer'}; "
+            f"top_rerank={improved['diagnostics'].get('evidence_top_rerank_score', 0.0):.4f}; "
+            f"threshold={improved['diagnostics'].get('evidence_threshold', 0.0):.4f}"
+        )
+    improved_correct = (
+        expected_document is not None
+        and not improved_abstained
+        and expected_document in {item["document_name"] for item in improved["citations"]}
+    )
+    if expected_document is None:
+        stats.improved_correct_abstention += int(improved_abstained)
+        stats.improved_false_answer += int(not improved_abstained)
+    else:
+        stats.improved_answerable_correct += int(improved_correct)
+        stats.improved_false_refusal += int(improved_abstained)
+    stats.improved_predicted_abstentions += int(improved_abstained)
 
 
 async def evaluate_direct(
@@ -501,6 +549,35 @@ def print_summary(stats: Stats) -> None:
         print("Abstention precision  : n/a (no questions were rejected)")
 
     print()
+    print("Abstention Decision Comparison (single-turn, n=12):")
+    print("Baseline:")
+    print(metric("Answerable correct", stats.baseline_answerable_correct, stats.answerable))
+    print(metric("Correct abstention", stats.baseline_correct_abstention, stats.unanswerable))
+    print(metric("False refusal", stats.baseline_false_refusal, stats.answerable))
+    print(metric("False answer", stats.baseline_false_answer, stats.unanswerable))
+    print(
+        metric(
+            "Abstention precision",
+            stats.baseline_correct_abstention,
+            stats.baseline_predicted_abstentions,
+        )
+    )
+    print(metric("Abstention recall", stats.baseline_correct_abstention, stats.unanswerable))
+    print("Improved:")
+    print(metric("Answerable correct", stats.improved_answerable_correct, stats.answerable))
+    print(metric("Correct abstention", stats.improved_correct_abstention, stats.unanswerable))
+    print(metric("False refusal", stats.improved_false_refusal, stats.answerable))
+    print(metric("False answer", stats.improved_false_answer, stats.unanswerable))
+    print(
+        metric(
+            "Abstention precision",
+            stats.improved_correct_abstention,
+            stats.improved_predicted_abstentions,
+        )
+    )
+    print(metric("Abstention recall", stats.improved_correct_abstention, stats.unanswerable))
+
+    print()
     print("Agent Behaviour:")
     total = stats.behaviour_passed + stats.behaviour_failed
     print(f"Passed : {stats.behaviour_passed}/{total}")
@@ -526,6 +603,7 @@ async def main() -> None:
         chroma_persist_dir=BASE_DIR / ".chroma",
         embedding_backend="hash",
         rerank_backend="lexical",
+        retrieval_top_k=TOP_K,
         chunk_size=200,
         chunk_overlap=30,
     )

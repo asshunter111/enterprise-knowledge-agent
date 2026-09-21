@@ -13,7 +13,10 @@ SCHEDULE_CROSS_TURN_HISTORY = [
     {"role": "user", "content": "A组的排班情况怎么样？"},
     {"role": "assistant", "content": "A组本周负责上午班次。"},
     {"role": "user", "content": "那么B组呢？"},
-    {"role": "assistant", "content": "1. B组本周负责下午班次。\n2. 周一B组安排陈晨、刘洋负责下午值班。"},
+    {
+        "role": "assistant",
+        "content": "1. B组本周负责下午班次。\n2. 周一B组安排陈晨、刘洋负责下午值班。",
+    },
 ]
 
 
@@ -116,7 +119,9 @@ async def test_rewrite_retrieval_recovers_chunk_that_raw_retrieval_misses():
     retriever = RecordingRetriever(
         {
             "第二条的对象是谁？": [],
-            "排班规则中第二条的对象是谁？": [chunk(3, "各小组原则上按照既定班次执行工作安排。", 0.66)],
+            "排班规则中第二条的对象是谁？": [
+                chunk(3, "各小组原则上按照既定班次执行工作安排。", 0.66)
+            ],
         }
     )
     resolver = ScriptedResolver(
@@ -192,7 +197,9 @@ async def test_new_intent_clears_active_context_but_keeps_history():
 
 @pytest.mark.asyncio
 async def test_resolver_failure_falls_back_to_original_query():
-    retriever = RecordingRetriever({"那么B组呢？": [chunk(0, "A组负责本周一至周五的上午班次。", 0.60)]})
+    retriever = RecordingRetriever(
+        {"那么B组呢？": [chunk(0, "A组负责本周一至周五的上午班次。", 0.60)]}
+    )
     resolver = ScriptedResolver(error=RuntimeError("resolver exploded"))
     agent = build_agent(retriever, resolver=resolver)
 
@@ -207,7 +214,9 @@ async def test_resolver_failure_falls_back_to_original_query():
 
 @pytest.mark.asyncio
 async def test_missing_llm_api_key_falls_back_without_raising():
-    retriever = RecordingRetriever({"那么B组呢？": [chunk(0, "A组负责本周一至周五的上午班次。", 0.60)]})
+    retriever = RecordingRetriever(
+        {"那么B组呢？": [chunk(0, "A组负责本周一至周五的上午班次。", 0.60)]}
+    )
     agent = build_agent(retriever)
 
     result = await agent.run("那么B组呢？", SCHEDULE_HISTORY)

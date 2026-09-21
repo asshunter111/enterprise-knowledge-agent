@@ -30,7 +30,7 @@
 
 ### Tool Router
 
-通过确定性规则路由到三个演示工具：查询年假、查询报销状态、查询会议室。当前不是 provider-native Function Calling。
+优先使用兼容 OpenAI API 的模型执行 provider-native Tool Calling，由模型从三个标准工具中选择并生成结构化参数：查询年假、查询报销状态、查询会议室。工具由独立 Executor 执行，结果通过 Tool Message 回传模型生成最终回答；没有 API Key、模型不支持工具调用或 provider 响应解析失败时，回落到 deterministic Tool Router。
 
 ### 权限控制
 
@@ -48,14 +48,16 @@ flowchart LR
     B -->|寒暄| C[直接回答]
     B -->|独立问题| D[RAG 检索]
     B -->|追问 / 新意图| E[Context Resolver]
-    B -->|业务查询| F[Tool Router]
+    B -->|业务查询| F[LLM Tool Calling]
     E --> G[原始 Query + 改写 Query]
     G --> H[向量检索 / 合并去重]
     D --> H
     H --> I[Verify]
     I --> J[Reranking]
     J --> K[生成回答]
-    F --> L[工具结果]
+    F --> G[Tool Execute]
+    G --> L[Tool Result]
+    L --> F
     C --> M[答案]
     K --> M
     L --> M
@@ -96,9 +98,9 @@ flowchart LR
 | Context Router | 规则判断寒暄、独立问题、追问和新意图 |
 | Context Resolver | 可选 LLM，将多轮问题恢复为检索 Query |
 | Memory | 按用户隔离的长期信息；短期状态由会话保存 |
-| Tool Router | 确定性路由到年假、报销、会议室演示工具 |
+| Tool Router | 支持 provider-native Tool Calling，并保留 deterministic fallback |
 | RBAC | `X-Role` 演示身份，按文档元数据过滤结果 |
-| MCP | 独立可选 stdio Server；当前未实现 Agent 侧远程 MCP Client |
+| MCP | 支持本地 stdio MCP Client/Server 调用链；不代表生产级远程 MCP 服务治理 |
 
 ## 技术栈
 
@@ -161,7 +163,7 @@ LLM_MODEL=deepseek-chat
 APP_API_KEY=
 ```
 
-配置 `LLM_API_KEY` 后，系统可使用兼容 OpenAI API 的模型生成答案和进行多轮 Query Rewrite。配置 `APP_API_KEY` 后，业务接口需要携带 `X-API-Key`。不要把 API Key 或数据库密码提交到 Git。
+配置 `LLM_API_KEY` 后，系统可使用兼容 OpenAI API 的模型生成答案、进行多轮 Query Rewrite 和 provider-native Tool Calling。没有 API Key 或 provider 不支持 Tool Calling 时，业务工具仍回落到 deterministic Tool Router。配置 `APP_API_KEY` 后，业务接口需要携带 `X-API-Key`。不要把 API Key 或数据库密码提交到 Git。
 
 ## API
 
@@ -232,9 +234,9 @@ GitHub Actions 当前配置执行：
 - 当前 `X-Role` 是请求头注入的演示身份，不是 JWT、OAuth、SSO 或完整 IAM。
 - Chroma 当前使用单集合，未实现生产级多租户隔离。
 - 文档处理使用 FastAPI `BackgroundTasks`，不适合大规模消息队列和分布式 Worker 场景。
-- 当前 MCP 仅提供独立 stdio Server，没有 Agent 侧远程 MCP Client，也没有完整 Agent-MCP 调用链。
-- Hash 评测中 3 个不可回答样本均未被正确拒答（`Correct abstention=0/3`）；生成质量、Faithfulness、权限和工具的自动化评测仍不完整。
-- 本次检查中 Ruff 仍有现有测试文件的 5 个 E501 行长度问题；不影响 `pytest` 的 31 个测试通过，但 CI 的 Ruff 步骤需要单独处理。
+- 当前支持本地 stdio MCP Client/Server 调用链：Agent 可发现并调用会议室 MCP 工具，支持超时、不可用和结构化结果处理；不代表生产级远程 MCP 服务治理。
+- Baseline 的 3 个不可回答样本均未被正确拒答（`Correct abstention=0/3`）。当前增加了 Rerank 后的 evidence decision（`evidence_min_rerank_score=0.20`）；在 12 个单轮评测样本（9 个可回答、3 个不可回答）上，Improved 为 `Correct abstention=1/3`、`False refusal=0/9`、`False answer=2/3`、Abstention Precision `1/1`、Recall `1/3`，可回答正确率保持 `9/9`。这不是生产级拒答保证，q09/q10 仍未解决，q10 还存在数据集语义争议。
+- 生成质量、Faithfulness、权限和工具的自动化评测仍不完整。
 
 ## 项目来源与二次开发
 
@@ -246,9 +248,9 @@ GitHub Actions 当前配置执行：
 - 原始 Query / 改写 Query 双路检索与去重
 - Reranking、Memory、Tool Router 和 RBAC 演示
 - Evaluation、E2E Testing、请求日志和 CI
-- Docker Compose 与独立 MCP stdio Server
+- Docker Compose、MCP stdio Client/Server 调用链
 
 仓库中未发现明确的 LICENSE 文件或许可证声明，因此不对原项目补充或推断 MIT、Apache、BSD 等许可证。
 
 更多设计与评测边界见 [docs/architecture.md](docs/architecture.md) 和 [docs/evaluation.md](docs/evaluation.md)。
-- `app/mcp_server.py` 是独立的可选 MCP stdio server，提供会议室和公司通知工具；当前没有 Agent 侧远程 MCP Client，不声称完整 Agent-MCP 集成。
+- `app/mcp_server.py` 提供会议室和公司通知工具；`app/core/mcp_client.py` 通过本地 stdio 建立 Agent → MCP Client → MCP Server → Tool 调用链。

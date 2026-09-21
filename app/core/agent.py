@@ -1,6 +1,5 @@
 import logging
 import operator
-import re
 from functools import lru_cache
 from typing import Annotated, TypedDict
 
@@ -18,9 +17,17 @@ from app.core.context_router import (
     direct_reply,
 )
 from app.core.generator import AnswerGenerator, get_answer_generator
+from app.core.mcp_client import MCPClientError, MCPStdioClient
 from app.core.permissions import filter_documents
 from app.core.retriever import Retriever, get_retriever
-from app.core.tools import BusinessToolRegistry, ToolExecutionError, build_default_tool_registry
+from app.core.tools import (
+    BusinessToolRegistry,
+    NativeToolCall,
+    ProviderToolCaller,
+    ToolCallingError,
+    ToolExecutionError,
+    build_default_tool_registry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +55,11 @@ class AgentState(TypedDict, total=False):
     user_id: str
     role: str
     tool_name: str | None
+    tool_source: str | None
     tool_arguments: dict
     tool_result: dict | None
+    native_tool_call: NativeToolCall | None
+    abstained: bool
     memory_context: list[dict]
     diagnostics: dict
     trace: Annotated[list[str], operator.add]
@@ -94,6 +104,8 @@ class EnterpriseRAGAgent:
         router: ContextRouter | None = None,
         tool_registry: BusinessToolRegistry | None = None,
         memory_service=None,
+        tool_caller: ProviderToolCaller | None = None,
+        mcp_client_factory=None,
     ) -> None:
         self.settings = settings
         self.retriever = retriever
@@ -102,6 +114,8 @@ class EnterpriseRAGAgent:
         self.router = router if router is not None else ContextRouter()
         self.tool_registry = tool_registry or build_default_tool_registry()
         self.memory_service = memory_service
+        self.tool_caller = tool_caller or ProviderToolCaller(settings, self.tool_registry)
+        self.mcp_client_factory = mcp_client_factory or self._default_mcp_client
         self.graph = self._build_graph(with_generate=True)
         self.context_graph = self._build_graph(with_generate=False)
 
@@ -120,6 +134,7 @@ class EnterpriseRAGAgent:
         graph.add_node("merge", self._merge)
         graph.add_node("verify", self._verify)
         graph.add_node("rerank", self._rerank)
+        graph.add_node("evidence_decision", self._evidence_decision)
         graph.add_node("no_context", self._no_context)
 
         graph.add_edge(START, "memory_context")
@@ -154,12 +169,18 @@ class EnterpriseRAGAgent:
         )
         graph.add_edge("no_context", END)
 
+        graph.add_edge("rerank", "evidence_decision")
+        graph.add_conditional_edges(
+            "evidence_decision",
+            self._route_after_evidence,
+            {"generate": "generate" if with_generate else END, "abstain": "no_context"},
+        )
+
         if with_generate:
             graph.add_node("generate", self._generate)
-            graph.add_edge("rerank", "generate")
             graph.add_edge("generate", END)
         else:
-            graph.add_edge("rerank", END)
+            graph.add_edge("no_context", END)
         return graph.compile()
 
     async def run(
@@ -182,8 +203,10 @@ class EnterpriseRAGAgent:
             "retrieval_query": state.get("retrieval_query") or query,
             "context_mode": state.get("context_mode", ""),
             "tool": state.get("tool_name"),
+            "tool_source": state.get("tool_source"),
             "memory_used": bool(state.get("memory_context")),
             "diagnostics": state.get("diagnostics", {}),
+            "abstained": state.get("abstained", False),
         }
 
     async def prepare_stream(
@@ -214,13 +237,39 @@ class EnterpriseRAGAgent:
 
     async def _context_router(self, state: AgentState) -> dict:
         query = state["query"]
+        fallback_trace: list[str] = []
+        if self.settings.llm_api_key:
+            try:
+                native_call = await self.tool_caller.propose(
+                    query, state.get("history", []), state.get("user_id", "anonymous")
+                )
+            except ToolCallingError as exc:
+                logger.warning("provider tool calling unavailable: %s", exc)
+                fallback_trace.append(f"tool_call: deterministic fallback ({exc})")
+            else:
+                if native_call is not None:
+                    return {
+                        "context_mode": "tool",
+                        "tool_name": native_call.name,
+                        "tool_source": "local",
+                        "tool_arguments": native_call.arguments,
+                        "native_tool_call": native_call,
+                        "trace": [f"context_router: native tool ({native_call.name})"],
+                    }
+
         tool_intent = self._detect_tool_intent(query, state.get("user_id", "anonymous"))
         if tool_intent is not None:
+            tool_name, tool_arguments = tool_intent
+            tool_source = "local"
+            if tool_name == "query_meeting_rooms":
+                tool_source = "mcp"
+            route_label = "mcp tool" if tool_source == "mcp" else "tool"
             return {
                 "context_mode": "tool",
-                "tool_name": tool_intent[0],
-                "tool_arguments": tool_intent[1],
-                "trace": [f"context_router: tool ({tool_intent[0]})"],
+                "tool_name": tool_name,
+                "tool_source": tool_source,
+                "tool_arguments": tool_arguments,
+                "trace": fallback_trace + [f"context_router: {route_label} ({tool_name})"],
             }
         mode = self.router.route(query, state.get("history", []), state.get("active_context"))
 
@@ -228,7 +277,7 @@ class EnterpriseRAGAgent:
             return {
                 "context_mode": DIRECT,
                 "retrieval_query": query,
-                "trace": ["context_router: direct response"],
+                "trace": fallback_trace + ["context_router: direct response"],
             }
         if mode == INDEPENDENT:
             # 单轮独立问题不经过上下文层，trace 与改造前保持一致
@@ -237,7 +286,7 @@ class EnterpriseRAGAgent:
         update: dict = {
             "context_mode": mode,
             "retrieval_query": query,
-            "trace": [f"context_router: {mode}"],
+            "trace": fallback_trace + [f"context_router: {mode}"],
         }
         if mode == NEW_INTENT:
             # 只切断旧意图，历史消息仍然保留
@@ -271,11 +320,29 @@ class EnterpriseRAGAgent:
 
     async def _tool_execute(self, state: AgentState) -> dict:
         name = state.get("tool_name") or ""
+        if state.get("tool_source") == "mcp":
+            try:
+                result = await self._execute_mcp_tool(
+                    "query_meeting_rooms", state.get("tool_arguments") or {}
+                )
+                return {"tool_result": result, "trace": [f"mcp: executed {name}"]}
+            except MCPClientError as exc:
+                logger.warning("MCP tool execution failed: %s", exc)
+                return {
+                    "tool_result": None,
+                    "answer": "MCP 业务工具当前不可用，请稍后重试。",
+                    "trace": [f"mcp: failed {name} ({exc})"],
+                }
         if name == "get_reimbursement_status" and state.get("role") not in {
             "finance",
             "admin",
             "manager",
         }:
+            if state.get("native_tool_call") is not None:
+                return {
+                    "tool_result": {"error": "当前角色无权查询报销单状态。"},
+                    "trace": [f"tool: denied {name}"],
+                }
             return {
                 "tool_result": None,
                 "answer": "当前角色无权查询报销单状态。",
@@ -288,6 +355,11 @@ class EnterpriseRAGAgent:
             return {"tool_result": result, "trace": [f"tool: executed {name}"]}
         except ToolExecutionError as exc:
             logger.warning("tool execution failed: %s", exc)
+            if state.get("native_tool_call") is not None:
+                return {
+                    "tool_result": {"error": "当前无法完成该业务查询。"},
+                    "trace": [f"tool: failed {name}"],
+                }
             return {
                 "tool_result": None,
                 "answer": "当前无法完成该业务查询。",
@@ -296,9 +368,37 @@ class EnterpriseRAGAgent:
 
     async def _tool_response(self, state: AgentState) -> dict:
         result = state.get("tool_result")
+        native_call = state.get("native_tool_call")
+        if native_call is not None:
+            try:
+                answer = await self.tool_caller.complete(native_call, result or {})
+                if answer.strip():
+                    return {
+                        "answer": answer,
+                        "citations": [],
+                        "trace": ["tool: native response completed"],
+                    }
+            except ToolCallingError as exc:
+                logger.warning("provider tool response unavailable: %s", exc)
+                return {
+                    "answer": self._format_tool_result(state.get("tool_name"), result),
+                    "citations": [],
+                    "trace": [f"tool: response fallback ({exc})"],
+                }
         if not result:
             return {"answer": state.get("answer") or "当前无法完成该业务查询。"}
-        name = state.get("tool_name")
+        return {
+            "answer": self._format_tool_result(state.get("tool_name"), result),
+            "citations": [],
+            "trace": ["tool: response completed"],
+        }
+
+    @staticmethod
+    def _format_tool_result(name: str | None, result: dict | None) -> str:
+        if not result or "error" in result:
+            if result:
+                return result.get("error", "当前无法完成该业务查询。")
+            return "当前无法完成该业务查询。"
         if name == "get_leave_balance":
             answer = f"员工 {result['employee_id']} 还剩 {result['annual_leave_days']} 天年假。"
         elif name == "get_reimbursement_status":
@@ -306,7 +406,21 @@ class EnterpriseRAGAgent:
         else:
             rooms = "、".join(result.get("rooms", [])) or "暂无空闲会议室"
             answer = f"{result.get('date')} {result.get('time')} 可用会议室：{rooms}。"
-        return {"answer": answer, "citations": [], "trace": ["tool: response completed"]}
+        return answer
+
+    async def _execute_mcp_tool(self, name: str, arguments: dict) -> dict:
+        async with self.mcp_client_factory() as client:
+            available = {tool.name for tool in await client.list_tools()}
+            if name not in available:
+                raise MCPClientError(f"MCP tool not found: {name}")
+            return await client.call_tool(name, arguments)
+
+    def _default_mcp_client(self) -> MCPStdioClient:
+        return MCPStdioClient(
+            command=self.settings.mcp_server_command,
+            args=["-m", self.settings.mcp_server_module],
+            timeout_seconds=self.settings.mcp_timeout_seconds,
+        )
 
     async def _retrieve(self, state: AgentState) -> dict:
         candidates = await self.retriever.retrieve(state["query"])
@@ -416,6 +530,31 @@ class EnterpriseRAGAgent:
             "trace": [f"rerank: selected {len(documents)} chunks"],
         }
 
+    async def _evidence_decision(self, state: AgentState) -> dict:
+        documents = state.get("documents", [])
+        top_score = max(
+            (float(item.get("rerank_score", item.get("score", 0.0))) for item in documents),
+            default=0.0,
+        )
+        sufficient = top_score >= self.settings.evidence_min_rerank_score
+        diagnostics = {
+            **state.get("diagnostics", {}),
+            "evidence_top_rerank_score": round(top_score, 4),
+            "evidence_threshold": self.settings.evidence_min_rerank_score,
+            "evidence_sufficient": sufficient,
+        }
+        if sufficient:
+            return {
+                "diagnostics": diagnostics,
+            }
+        return {
+            "documents": [],
+            "citations": [],
+            "abstained": True,
+            "diagnostics": diagnostics,
+            "trace": [f"evidence: insufficient ({top_score:.4f})"],
+        }
+
     async def _generate(self, state: AgentState) -> dict:
         history = list(state.get("history", []))
         if state.get("memory_context"):
@@ -439,6 +578,7 @@ class EnterpriseRAGAgent:
         return {
             "documents": [],
             "answer": FALLBACK_ANSWER,
+            "abstained": True,
             "citations": [],
             "trace": ["no_context: no reliable evidence"],
         }
@@ -474,6 +614,10 @@ class EnterpriseRAGAgent:
         return "rerank" if state.get("candidates") else "no_context"
 
     @staticmethod
+    def _route_after_evidence(state: AgentState) -> str:
+        return "generate" if not state.get("abstained") else "abstain"
+
+    @staticmethod
     def _initial_state(
         query: str,
         history: list[dict] | None,
@@ -499,8 +643,11 @@ class EnterpriseRAGAgent:
             "user_id": user_id,
             "role": role,
             "tool_name": None,
+            "tool_source": None,
             "tool_arguments": {},
             "tool_result": None,
+            "native_tool_call": None,
+            "abstained": False,
             "memory_context": [],
             "diagnostics": {},
         }
@@ -509,6 +656,8 @@ class EnterpriseRAGAgent:
     def _detect_tool_intent(query: str, user_id: str) -> tuple[str, dict] | None:
         if any(token in query for token in ("年假", "年休假", "假期余额")):
             return "get_leave_balance", {"employee_id": user_id}
+        import re
+
         reimbursement = re.search(r"(?:报销单|申请)[\s#号：:]*([A-Za-z0-9-]+)", query)
         if "报销" in query and ("状态" in query or "到哪" in query or reimbursement):
             return "get_reimbursement_status", {

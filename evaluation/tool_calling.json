@@ -1,0 +1,49 @@
+[
+  {
+    "id": "tool-01",
+    "category": "leave",
+    "question": "我还有多少年假？",
+    "expected_tool": "get_leave_balance",
+    "expected_arguments": {"employee_id": "employee-1"}
+  },
+  {
+    "id": "tool-02",
+    "category": "reimbursement",
+    "question": "报销单 R-100 当前到哪一步了？",
+    "expected_tool": "get_reimbursement_status",
+    "expected_arguments": {"reimbursement_id": "R-100"}
+  },
+  {
+    "id": "tool-03",
+    "category": "meeting_room",
+    "question": "明天下午有没有空闲会议室？",
+    "expected_tool": "query_meeting_rooms",
+    "expected_arguments": {"date": "明天", "time": "下午"}
+  },
+  {
+    "id": "tool-04",
+    "category": "knowledge",
+    "question": "员工报销需要在费用发生后多久提交？",
+    "expected_tool": null
+  },
+  {
+    "id": "tool-05",
+    "category": "execution_failure",
+    "question": "查询年假",
+    "expected_tool": "get_leave_balance",
+    "expected_arguments": {"employee_id": ""},
+    "expected_result": "controlled_error"
+  },
+  {
+    "id": "tool-06",
+    "category": "ambiguous",
+    "question": "帮我查一下那个状态",
+    "expected_tool": null
+  },
+  {
+    "id": "tool-07",
+    "category": "knowledge",
+    "question": "RAG 中的 Embedding 用来做什么？",
+    "expected_tool": null
+  }
+]
