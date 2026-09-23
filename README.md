@@ -226,18 +226,6 @@ GitHub Actions 当前配置执行：
 - `python -m compileall -q app evaluation tests`
 - `pytest -q`
 
-## 当前限制
-
-- Hash Embedding 适合零下载演示；需要更强语义检索时应使用 BGE，并单独评测模型效果。
-- 没有 `LLM_API_KEY` 时，Context Resolver 不做真正的多轮改写，只回落到原始 Query；答案使用抽取式生成。
-- Context Router 是规则实现，复杂指代和省略仍需要进一步覆盖。
-- 当前 `X-Role` 是请求头注入的演示身份，不是 JWT、OAuth、SSO 或完整 IAM。
-- Chroma 当前使用单集合，未实现生产级多租户隔离。
-- 文档处理使用 FastAPI `BackgroundTasks`，不适合大规模消息队列和分布式 Worker 场景。
-- 当前支持本地 stdio MCP Client/Server 调用链：Agent 可发现并调用会议室 MCP 工具，支持超时、不可用和结构化结果处理；不代表生产级远程 MCP 服务治理。
-- Baseline 的 3 个不可回答样本均未被正确拒答（`Correct abstention=0/3`）。当前增加了 Rerank 后的 evidence decision（`evidence_min_rerank_score=0.20`）；在 12 个单轮评测样本（9 个可回答、3 个不可回答）上，Improved 为 `Correct abstention=1/3`、`False refusal=0/9`、`False answer=2/3`、Abstention Precision `1/1`、Recall `1/3`，可回答正确率保持 `9/9`。这不是生产级拒答保证，q09/q10 仍未解决，q10 还存在数据集语义争议。
-- 生成质量、Faithfulness、权限和工具的自动化评测仍不完整。
-
 ## 项目来源与二次开发
 
 本项目基于 GitHub 开源项目 [XIAOYE616/enterprise-rag-agent](https://github.com/XIAOYE616/enterprise-rag-agent) 进行企业内部知识库场景的重构与二次开发。
