@@ -218,7 +218,7 @@ Copy-Item .env.example .env
 
 ```
 
-Compose 配置已提供，但本次 README 重构未进行 Docker runtime 验证，不将其描述为已验证的生产部署方案。
+
 
 GitHub Actions 当前配置执行：
 
